@@ -1,0 +1,13 @@
+# compile vhdl design source files
+vhdl xil_defaultlib  \
+"../../../../structural_represenation.srcs/sources_1/new/and2.vhd" \
+"../../../../structural_represenation.srcs/sources_1/new/full_adder_struct.vhd" \
+"../../../../structural_represenation.srcs/sources_1/new/or2.vhd" \
+"../../../../structural_represenation.srcs/sources_1/new/two_bit_adder_beh.vhd" \
+"../../../../structural_represenation.srcs/sources_1/new/two_bit_adder_struct.vhd" \
+"../../../../structural_represenation.srcs/sources_1/new/xor2.vhd" \
+"../../../../structural_represenation.srcs/sources_1/new/xor3.vhd" \
+"../../../../structural_represenation.srcs/sim_1/new/two_bit_adder_tb.vhd" \
+
+# Do not sort compile order
+nosort

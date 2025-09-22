@@ -1,0 +1,11 @@
+Vivado Simulator 2018.2
+Time resolution is 1 ps
+Note: Starting testbench...
+Time: 0 ps  Iteration: 0  Process: /and5_tb/tb_proc  File: D:/university/learn_hardware/structural_represenation/structural_represenation.srcs/sim_1/new/and5_tb.vhd
+Note: ALL TESTS PASSED! Both implementations are equivalent.
+Time: 800 ns  Iteration: 0  Process: /and5_tb/tb_proc  File: D:/university/learn_hardware/structural_represenation/structural_represenation.srcs/sim_1/new/and5_tb.vhd
+Failure: End of simulation
+Time: 800 ns  Iteration: 0  Process: /and5_tb/tb_proc  File: D:/university/learn_hardware/structural_represenation/structural_represenation.srcs/sim_1/new/and5_tb.vhd
+$finish called at time : 800 ns : File "D:/university/learn_hardware/structural_represenation/structural_represenation.srcs/sim_1/new/and5_tb.vhd" Line 96
+m_1/new/demux_1x4_tb.vhd" Line 106
+hd" Line 113
