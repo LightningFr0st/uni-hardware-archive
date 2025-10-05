@@ -1,6 +1,0 @@
-Vivado Simulator 2018.2
-Time resolution is 1 ps
-Failure: Finished
-Time: 50 ns  Iteration: 0  Process: /d_trigger_async_preset_tb/stim  File: D:/university/learn_hardware/memory_elements/memory_elements.srcs/sim_1/new/d_trigger_async_preset_tb.vhd
-$finish called at time : 50 ns : File "D:/university/learn_hardware/memory_elements/memory_elements.srcs/sim_1/new/d_trigger_async_preset_tb.vhd" Line 56
-" Line 74

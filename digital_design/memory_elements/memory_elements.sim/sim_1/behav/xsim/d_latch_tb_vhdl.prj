@@ -1,7 +1,0 @@
-# compile vhdl design source files
-vhdl xil_defaultlib  \
-"../../../../memory_elements.srcs/sources_1/new/d_latch_beh.vhd" \
-"../../../../memory_elements.srcs/sim_1/new/d_latch_tb.vhd" \
-
-# Do not sort compile order
-nosort
