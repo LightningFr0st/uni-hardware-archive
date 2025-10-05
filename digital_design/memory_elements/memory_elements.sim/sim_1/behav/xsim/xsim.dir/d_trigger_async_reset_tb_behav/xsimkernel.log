@@ -1,0 +1,7 @@
+Running: xsim.dir/d_trigger_async_reset_tb_behav/xsimk.exe -simmode gui -wdb d_trigger_async_reset_tb_behav.wdb -simrunnum 0 -socket 64886
+Design successfully loaded
+Design Loading Memory Usage: 7700 KB (Peak: 7700 KB)
+Design Loading CPU Usage: 0 ms
+Simulation completed
+Simulation Memory Usage: 8212 KB (Peak: 8212 KB)
+Simulation CPU Usage: 0 ms

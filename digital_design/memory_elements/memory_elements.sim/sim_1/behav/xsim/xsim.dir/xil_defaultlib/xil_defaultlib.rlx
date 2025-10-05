@@ -1,0 +1,26 @@
+0.6
+2018.2
+Jun 14 2018
+20:41:02
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sim_1/new/bistable_elem_tb.vhd,1759669332,vhdl,,,,bistable_elem_tb,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sim_1/new/d_latch_tb.vhd,1759670468,vhdl,,,,d_latch_tb,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sim_1/new/d_trigger_async_preset_tb.vhd,1759672014,vhdl,,,,d_trigger_async_preset_tb,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sim_1/new/d_trigger_async_reset_tb.vhd,1759671869,vhdl,,,,d_trigger_async_reset_tb,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sim_1/new/d_trigger_master_slave_tb.vhd,1759676279,vhdl,,,,d_trigger_master_slave_tb,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sim_1/new/d_trigger_tb.vhd,1759671638,vhdl,,,,d_trigger_tb,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sim_1/new/rs_latch_tb.vhd,1759669787,vhdl,,,,rs_latch_tb,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sim_1/new/t_trigger_tb.vhd,1759672528,vhdl,,,,t_trigger_tb,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sources_1/new/and2.vhd,1759662666,vhdl,,,,and2,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sources_1/new/bistable_elem.vhd,1759666301,vhdl,,,,bistable_elem,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sources_1/new/d_latch_beh.vhd,1759670313,vhdl,,,,d_latch_beh,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sources_1/new/d_latch_struct.vhd,1759663147,vhdl,,,,d_latch_struct,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sources_1/new/d_trigger.vhd,1759671580,vhdl,D:/university/learn_hardware/memory_elements/memory_elements.srcs/sim_1/new/d_trigger_tb.vhd,,,d_trigger,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sources_1/new/d_trigger_async_preset.vhd,1759671983,vhdl,D:/university/learn_hardware/memory_elements/memory_elements.srcs/sim_1/new/d_trigger_async_preset_tb.vhd,,,d_trigger_async_preset,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sources_1/new/d_trigger_async_reset.vhd,1759671800,vhdl,D:/university/learn_hardware/memory_elements/memory_elements.srcs/sim_1/new/d_trigger_async_reset_tb.vhd,,,d_trigger_async_reset,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sources_1/new/d_trigger_master_slave.vhd,1759675204,vhdl,D:/university/learn_hardware/memory_elements/memory_elements.srcs/sim_1/new/d_trigger_master_slave_tb.vhd,,,d_trigger_master_slave,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sources_1/new/frequency_divider.vhd,1759677274,vhdl,,,,frequency_divider,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sources_1/new/inv.vhd,1759662925,vhdl,,,,inv,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sources_1/new/nor2_beh.vhd,1759656821,vhdl,,,,nor2_beh,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sources_1/new/rs_latch_beh.vhd,1759656705,vhdl,,,,rs_latch_beh,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sources_1/new/rs_latch_struct.vhd,1759662938,vhdl,,,,rs_latch_struct,,,,,,,,
+D:/university/learn_hardware/memory_elements/memory_elements.srcs/sources_1/new/t_trigger.vhd,1759672615,vhdl,D:/university/learn_hardware/memory_elements/memory_elements.srcs/sim_1/new/t_trigger_tb.vhd,,,t_trigger,,,,,,,,

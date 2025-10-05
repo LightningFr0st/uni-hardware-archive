@@ -1,0 +1,7 @@
+# compile vhdl design source files
+vhdl xil_defaultlib  \
+"../../../../memory_elements.srcs/sources_1/new/d_trigger_async_reset.vhd" \
+"../../../../memory_elements.srcs/sim_1/new/d_trigger_async_reset_tb.vhd" \
+
+# Do not sort compile order
+nosort
