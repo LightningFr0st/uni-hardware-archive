@@ -1,6 +1,7 @@
 #include "main.h"
 
 #define MFS_SET_LEDS(STATE) \
+				HAL_GPIO_WritePin(D1_led_GPIO_Port, D1_led_Pin, STATE); \
 				HAL_GPIO_WritePin(D2_led_GPIO_Port, D2_led_Pin, STATE); \
 				HAL_GPIO_WritePin(D3_led_GPIO_Port, D3_led_Pin, STATE); \
 				HAL_GPIO_WritePin(D4_led_GPIO_Port, D4_led_Pin, STATE) \
