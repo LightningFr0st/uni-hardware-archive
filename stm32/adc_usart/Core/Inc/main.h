@@ -42,6 +42,10 @@ extern "C" {
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
 extern volatile uint8_t flag;
+
+void AdcDataReset();
+
+
 /* USER CODE END EC */
 
 /* Exported macro ------------------------------------------------------------*/

@@ -101,6 +101,14 @@ void SwapActiveADC()
 	active_index = (active_index + 1) % 2;
 }
 
+void AdcDataReset()
+{
+	adc_data[0] = 0u;
+  adc_data[1] = 0u;
+  
+	HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&adc_data, 2);
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -158,12 +166,8 @@ int main(void)
 				KS_SET_RGB_VEC(COLORS[data / STEP].rgb);
 				
 				sprintf(data_msg, "%hu\r\n", data);	
-				HAL_UART_Transmit(&huart2, (uint8_t*)data_msg, strlen(data_msg), HAL_MAX_DELAY);
+				HAL_UART_Transmit_DMA(&huart2, (uint8_t*)data_msg, strlen(data_msg));
 			
-        adc_data[0] = 0u;
-        adc_data[1] = 0u;
-        
-				HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&adc_data, 2);
 		}
     /* USER CODE END WHILE */
 
