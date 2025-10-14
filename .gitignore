@@ -230,3 +230,6 @@ dkms.conf
 *.l1p
 *.l2p
 *.iex
+
+/**/_build/
+/**/_build/*
