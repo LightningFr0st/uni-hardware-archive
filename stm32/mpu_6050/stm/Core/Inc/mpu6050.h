@@ -1,52 +1,53 @@
-/*
- * mpu6050.h
- *
- *  Created on: Nov 13, 2019
- *      Author: Bulanov Konstantin
- */
+
 
 #ifndef INC_GY521_H_
+
 #define INC_GY521_H_
 
-#endif /* INC_GY521_H_ */
+#include "spi_utils.h"
 
 #include <stdint.h>
 
-// MPU6050 structure
-typedef struct
-{
+// MPU registers
 
-    int16_t Accel_X_RAW;
-    int16_t Accel_Y_RAW;
-    int16_t Accel_Z_RAW;
-    double Ax;
-    double Ay;
-    double Az;
-
-    int16_t Gyro_X_RAW;
-    int16_t Gyro_Y_RAW;
-    int16_t Gyro_Z_RAW;
-    double Gx;
-    double Gy;
-    double Gz;
-
-    float Temperature;
-
-    double KalmanAngleX;
-    double KalmanAngleY;
-} MPU6050_t;
+#define WHO_AM_I_REG 0x75
+#define PWR_MGMT_1_REG 0x6B
+#define PWR_MGMT_2_REG 0x6C
+#define SMPLRT_DIV_REG 0x19
+#define ACCEL_CONFIG_REG 0x1C
+#define ACCEL_XOUT_H_REG 0x3B
+#define TEMP_OUT_H_REG 0x41
+#define GYRO_CONFIG_REG 0x1B
+#define GYRO_XOUT_H_REG 0x43
 
 // Kalman structure
 typedef struct
 {
-    double Q_angle;
-    double Q_bias;
-    double R_measure;
-    double angle;
-    double bias;
-    double P[2][2];
+    float Q_angle;
+    float Q_bias;
+    float R_measure;
+    float angle;
+    float bias;
+    float P[2][2];
 } Kalman_t;
 
-void MPU6050_Read_All(I2C_HandleTypeDef *I2Cx, MPU6050_t *DataStruct);
+// MPU6050 structure
+typedef struct
+{
+		Kalman_t KalmanX;
+		Kalman_t KalmanY;
+		
+		uint32_t timer;
+	
+    double KalmanAngleX;
+    double KalmanAngleY;
+} MPU6500_t;
 
-double Kalman_getAngle(Kalman_t *Kalman, double newAngle, double newRate, double dt);
+
+uint8_t init_mpu(SPI_HandleTypeDef* hspi, GPIO_TypeDef* cs_port, uint16_t cs_pin);
+
+void process_mpu_data(MPU6500_t* mpu_state, const uint8_t raw14[14]);
+
+void Kalman_Init(Kalman_t *k);
+
+#endif

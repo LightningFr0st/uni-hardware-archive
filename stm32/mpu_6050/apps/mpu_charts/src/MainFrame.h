@@ -6,11 +6,7 @@
 #include <wx/wx.h>
 #include <array>
 #include <memory>
-
-namespace mpu_6050 
-{
-	class MpuProcessor;
-}
+#include <atomic>
 
 class MainFrame : public wxFrame
 {
@@ -22,6 +18,8 @@ private:
 	void OnTimer(wxTimerEvent& event);
 	void OnClose(wxCloseEvent& event);
 
+	void OnRateTimer(wxTimerEvent& event);
+
 	static int series_index(uint8_t i2c, uint8_t addr) { return (i2c & 1) * 2 + (addr & 1); }
 
 private:
@@ -30,8 +28,12 @@ private:
 	ChartControl* chartY{ nullptr };
 	wxTimer* timer{ nullptr };
 
+	wxTimer* rateTimer{ nullptr };
+	wxStaticText* rateLabel{ nullptr };
+
+	std::atomic<uint32_t> packetsCounter{ 0 };
+
 	::mpu_6050::ComPortReader com_reader;
-	std::unique_ptr<::mpu_6050::MpuProcessor> processor;
 
 	wxDECLARE_EVENT_TABLE();
 };

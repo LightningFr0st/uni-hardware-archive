@@ -21,29 +21,78 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+
 #include "stdio.h"
 #include "string.h"
-#include "stdbool.h"
-#include "math.h"
+
+#include "mpu6050.h"
+#include "sd.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+
+typedef struct 
+{
+    MPU6500_t mpu_state;
+	
+		// CS info
+	  GPIO_TypeDef *cs_port;
+    uint16_t      cs_pin;
+    
+} MPUDescr_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t mpu_id;
+    float   kx; // roll
+    float   ky; // pitch
+} LogPacket_t;
+
+typedef enum
+{
+	NONE = 0,
+	WRITE = 1,
+  WAIT_AFTER_WRITE = 2,
+	READ = 3,
+	WAIT_AFTER_READ = 4,
+	STATES_NUM = 5
+} ProgState_t;
+
+typedef enum 
+{ 
+  CHUNK_FREE = 0,
+  CHUNK_COMMITTED = 1, 
+  CHUNK_LOCKED = -1,
+  CHUNK_IN_TRANSACTION = 2,
+} Chunk_state_t;
+
+typedef struct
+{
+  uint8_t packNum;
+  uint8_t * dataPtr;
+} PeekResults;
+
+#define LOG_BUFFER_SIZE 1024
+#define NUM_CHUNKS 2
+typedef struct 
+{
+    uint8_t  data[LOG_BUFFER_SIZE];
+
+    volatile uint16_t head;
+    volatile uint16_t tail;
+		volatile int8_t states_of_chunks[NUM_CHUNKS]; 
+	
+} RingBuffer_t;
 
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-#define MPU6050_Address 0xD0
-#define PWR_MGMT_1_REG 0x6B
-#define SMPLRT_DIV_REG 0x19
-#define ACCEL_CONFIG_REG 0x1B
-#define GYRO_CONFIG_REG 0x1C
-#define INT_ENABLE_REG 0x38
-#define INT_PIN_CFG_REG 0x37
-#define ACCEL_XOUT_H_REG 0x3B
-#define INT_STATUS 0x3A
+#define NUM_MPU_SPI 5
+#define MAX_BLOCK_BYTES_NUM 504
+#define PACKET_SIZE 9
 
 /* USER CODE END PD */
 
@@ -53,14 +102,32 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-I2C_HandleTypeDef hi2c1;
-I2C_HandleTypeDef hi2c2;
-DMA_HandleTypeDef hdma_i2c1_rx;
-DMA_HandleTypeDef hdma_i2c2_rx;
+SPI_HandleTypeDef hspi1;
+SPI_HandleTypeDef hspi2;
+DMA_HandleTypeDef hdma_spi2_rx;
+DMA_HandleTypeDef hdma_spi2_tx;
 
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+
+static volatile ProgState_t curr_state = NONE;
+
+static volatile uint8_t is_changed_state = 0;
+static volatile uint32_t sd_write_block_counter = 0;
+static volatile uint8_t need_send = 1;
+
+volatile uint32_t last_click_ticks = 0u;
+
+static MPUDescr_t mpu_descriptors[5] = {
+    { {0}, CS0_GPIO_Port, CS0_Pin },
+    { {0}, CS1_GPIO_Port, CS1_Pin },
+    { {0}, CS2_GPIO_Port, CS2_Pin },
+    { {0}, CS3_GPIO_Port, CS3_Pin },
+		{ {0}, CS4_GPIO_Port, CS4_Pin },
+};
+
+static RingBuffer_t log_rb;
 
 /* USER CODE END PV */
 
@@ -68,9 +135,9 @@ UART_HandleTypeDef huart2;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
-static void MX_I2C1_Init(void);
 static void MX_USART2_UART_Init(void);
-static void MX_I2C2_Init(void);
+static void MX_SPI1_Init(void);
+static void MX_SPI2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -78,148 +145,318 @@ static void MX_I2C2_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-#define MPU_ADDR_AD0_LOW   0xD0
-#define MPU_ADDR_AD0_HIGH  0xD2
-
-typedef struct {
-    I2C_HandleTypeDef *i2c;
-    uint16_t addr;
-    uint8_t  buf[14];
-    volatile uint8_t busy;
-    volatile uint8_t ready;
-	  uint8_t bus_id;
-    uint8_t slot_id;
-} mpu_t;
-
-mpu_t mpus[4] = {
-    { .i2c=&hi2c1, .addr=MPU_ADDR_AD0_LOW,  .busy=0, .ready=0, .bus_id=1, .slot_id=0 },
-    { .i2c=&hi2c1, .addr=MPU_ADDR_AD0_HIGH, .busy=0, .ready=0, .bus_id=1, .slot_id=1 },
-    { .i2c=&hi2c2, .addr=MPU_ADDR_AD0_LOW,  .busy=0, .ready=0, .bus_id=2, .slot_id=0 },
-    { .i2c=&hi2c2, .addr=MPU_ADDR_AD0_HIGH, .busy=0, .ready=0, .bus_id=2, .slot_id=1 },
-};
-
-typedef struct {
-    I2C_HandleTypeDef* i2c;
-    int cur_idx;
-    int next_idx;
-    int members[2];
-} bus_ctx_t;
-
-bus_ctx_t buses[2];
-
-static void init_bus_ctx(void) {
-    buses[0].i2c = &hi2c1; buses[0].cur_idx = -1; buses[0].next_idx = 0;
-    buses[1].i2c = &hi2c2; buses[1].cur_idx = -1; buses[1].next_idx = 0;
-    int b1=0,b2=0;
-    for (int i=0;i<4;i++) {
-        if (mpus[i].i2c == &hi2c1) buses[0].members[b1++] = i;
-        else                       buses[1].members[b2++] = i;
-    }
-}
-
-static inline void start_read(int idx) {
-    mpu_t* s = &mpus[idx];
-    if (HAL_I2C_GetState(s->i2c) != HAL_I2C_STATE_READY) return;
-    if (s->busy) return;
-    if (HAL_I2C_Mem_Read_DMA(s->i2c, s->addr, ACCEL_XOUT_H_REG,
-                             I2C_MEMADD_SIZE_8BIT, s->buf, 14) == HAL_OK) {
-        s->busy = 1;
-        bus_ctx_t* bc = (s->i2c == &hi2c1) ? &buses[0] : &buses[1];
-        bc->cur_idx = idx;
-    }
-}
-
-static void MPU_Init(I2C_HandleTypeDef *bus, uint16_t addr8) 
+static inline void rb_init(RingBuffer_t *rb)
 {
-	uint8_t v;
-	HAL_I2C_Mem_Read (&hi2c1, addr8, 0x75, 1, &v, 1, 1000);
+    rb->head = 0;
+    rb->tail = 0;
 
-	v = 0x00; 
-	HAL_I2C_Mem_Write(bus, addr8, 0x6B, 1, &v, 1, 100);
+    for (int i = 0; i < NUM_CHUNKS; i++) {
+        rb->states_of_chunks[i] = CHUNK_FREE;
+    }
 
-	v = 0x07; 
-	HAL_I2C_Mem_Write(bus, addr8, 0x19, 1, &v, 1, 100);
-
-	v = 0x00; 
-	HAL_I2C_Mem_Write(bus, addr8, 0x1B, 1, &v, 1, 100);
-	
-	v = 0x00; 
-	HAL_I2C_Mem_Write(bus, addr8, 0x1C, 1, &v, 1, 100);
+    memset(rb->data, 0, sizeof(rb->data));
 }
 
+static inline uint32_t chunk_start_ind(uint16_t chunk_id)
+{ 
+  return (uint32_t)chunk_id * SD_CHUNK_SIZE; 
+}
 
-void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
+static inline uint32_t chunk_end_bound(uint16_t chunk_id)
+{ 
+  return chunk_start_ind(chunk_id) + MAX_BLOCK_BYTES_NUM;
+}
+
+static inline uint8_t curr_chunk(uint16_t curr_ind)
+{ 
+  return (curr_ind / SD_CHUNK_SIZE) % NUM_CHUNKS; 
+}
+
+inline static uint8_t next_chunk(uint16_t chunk_id)
+{ 
+  return (chunk_id + 1) % NUM_CHUNKS; 
+}
+
+static int16_t rb_push_bytes(uint8_t * src, uint16_t len)
 {
-    bus_ctx_t* bc = (hi2c == &hi2c1) ? &buses[0] : &buses[1];
-    int idx = bc->cur_idx;
-    if (idx >= 0) {
-        mpus[idx].busy  = 0;
-        mpus[idx].ready = 1;
-        bc->cur_idx = -1;
-    }
-}
-
-static inline uint8_t i2c_bus_bit(const mpu_t* s) {
-    return (s->i2c == &hi2c2) ? 1u : 0u;
-}
-static inline uint8_t addr_bit(const mpu_t* s) {
-    return (s->addr == MPU_ADDR_AD0_HIGH) ? 1u : 0u; // 0x69<<1
-}
-
-static void bytes_to_hex(const uint8_t* src, size_t len, char* dst) {
-    static const char hexdig[] = "0123456789ABCDEF";
-    for (size_t i = 0; i < len; ++i) {
-        uint8_t b = src[i];
-        dst[2*i + 0] = hexdig[(b >> 4) & 0xF];
-        dst[2*i + 1] = hexdig[b & 0xF];
-    }
-}
-
-static void process_and_send(int idx) {
-    mpu_t* s = &mpus[idx];
-	
-		uint8_t pkt[17];
-    pkt[0] = (i2c_bus_bit(s) & 1u) | ((addr_bit(s) & 1u) << 1);
-
-    pkt[1] = s->buf[1];  pkt[2] = s->buf[0];   // AX
-    pkt[3] = s->buf[3];  pkt[4] = s->buf[2];   // AY
-    pkt[5] = s->buf[5];  pkt[6] = s->buf[4];   // AZ
-	
-    pkt[7]  = s->buf[9];  pkt[8]  = s->buf[8];   // GX
-    pkt[9]  = s->buf[11]; pkt[10] = s->buf[10];  // GY
-    pkt[11] = s->buf[13]; pkt[12] = s->buf[12];  // GZ
   
-    uint32_t t = HAL_GetTick();
-    pkt[13] = (uint8_t)(t);
-    pkt[14] = (uint8_t)(t >> 8);
-    pkt[15] = (uint8_t)(t >> 16);
-    pkt[16] = (uint8_t)(t >> 24);
-	
-		char line[17*2 + 2];
-    bytes_to_hex(pkt, sizeof(pkt), line);
-    line[34] = '\r';
-    line[35] = '\n';
+  if (len == 0 || len > MAX_BLOCK_BYTES_NUM)
+    return 0;
 
-    HAL_UART_Transmit(&huart2, (uint8_t*)line, 36, 1000);
-	
-    s->ready = 0;
+  uint8_t operated_chunk = curr_chunk(log_rb.head); 
+
+  if (log_rb.states_of_chunks[operated_chunk] != CHUNK_FREE) 
+    return -1;
+
+  uint32_t start = chunk_start_ind(operated_chunk);
+  uint32_t bound = start + MAX_BLOCK_BYTES_NUM;
+
+  uint32_t offset_in_chunk = log_rb.head - start;
+  uint32_t avail = MAX_BLOCK_BYTES_NUM - offset_in_chunk;
+
+  if (len > avail) 
+  {
+    return 0;
+  }
+      
+  for (uint16_t i = 0; i < len; i++) {
+      log_rb.data[(log_rb.head)++] = src[i];
+  }
+
+  log_rb.data[start + SD_CHUNK_SIZE - 1] += (len / PACKET_SIZE);
+
+  if (log_rb.head == bound)
+  {
+    log_rb.states_of_chunks[operated_chunk] = CHUNK_LOCKED; 
+    log_rb.head = chunk_start_ind(next_chunk(operated_chunk));
+  }
+
+  return len; 
 }
 
-void poll_loop(void)
+static int16_t log_push_packet(uint8_t mpu_idx, const MPU6500_t *mpu_state)
 {
-    for (;;) {
-        for (int b=0;b<2;b++) {
-            bus_ctx_t* bc = &buses[b];
-            if (bc->cur_idx < 0) {
-                int i0 = bc->members[bc->next_idx];
-                start_read(i0);
-                bc->next_idx ^= 1;
-            }
+    LogPacket_t pkt;
+    pkt.mpu_id = mpu_idx;
+    pkt.kx = (float)mpu_state->KalmanAngleX;
+    pkt.ky = (float)mpu_state->KalmanAngleY;
+
+    return rb_push_bytes((uint8_t *) &pkt, sizeof(pkt));
+}
+
+void parse_and_send_packets(const uint8_t *data, uint16_t packet_num)
+{
+    if (packet_num == 0) 
+        return;
+    const uint16_t max_packets = MAX_BLOCK_BYTES_NUM / PACKET_SIZE;
+    if (packet_num > max_packets) packet_num = max_packets;
+
+    char line[64];
+
+    for (uint16_t i = 0; i < packet_num; ++i) {
+        
+        const uint32_t offset = (uint32_t)i * PACKET_SIZE;
+        if (offset + PACKET_SIZE > SD_CHUNK_SIZE) break;
+
+        LogPacket_t pkt;
+        memcpy(&pkt, data + i * PACKET_SIZE, PACKET_SIZE);
+
+        int len = snprintf(line, sizeof(line),
+                           "#%d#%.4f#%.4f\r\n",
+                           pkt.mpu_id, pkt.kx, pkt.ky);
+        if (len <= 0) {
+            break;
         }
-        for (int i=0;i<4;i++) {
-            if (mpus[i].ready) process_and_send(i);
+        if (len >= (int)sizeof(line)) 
+				{
+            len = sizeof(line) - 1;
         }
+
+        HAL_UART_Transmit(&huart2, (uint8_t*)line, (uint16_t)len, HAL_MAX_DELAY);
     }
+}
+
+static void log_peek_chunk(PeekResults *pRes)
+{
+    uint16_t tail = log_rb.tail;
+    uint8_t chunk_id = curr_chunk(tail);
+
+    uint32_t start = chunk_start_ind(chunk_id);
+
+    pRes->dataPtr = &log_rb.data[start];
+
+    pRes->packNum = log_rb.data[start + SD_CHUNK_SIZE - 1];
+}
+
+static void send_mpu_data(uint8_t idx)
+{	
+		MPU6500_t* mpu_state = &mpu_descriptors[idx].mpu_state;
+	
+    char buf[64];
+	  
+		int len = snprintf(buf, sizeof(buf),
+											 "#%d#%.4f#%.4f\r\n",
+											 idx,
+											 mpu_state->KalmanAngleX,
+                       mpu_state->KalmanAngleY);
+		
+    if (len > 0 && len < (int)sizeof(buf)) 
+		{
+        HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)len, 100);
+    }
+}
+
+
+static void none_state_act(uint8_t* raw){
+  for (int i = 0; i < NUM_MPU_SPI; ++i) {
+    if (mpu_read_registers(&hspi1, mpu_descriptors[i].cs_port, mpu_descriptors[i].cs_pin, ACCEL_XOUT_H_REG, raw, 14) == HAL_OK) 
+    {
+      process_mpu_data(&mpu_descriptors[i].mpu_state, raw);
+      send_mpu_data(i);
+    }
+  }
+} 
+
+static uint8_t iterate_sent_chunks(){
+  uint8_t processed_num = 0u;
+  for(int i = 0; i < NUM_CHUNKS; i++){
+		uint8_t last_tail = 0;
+		
+    switch (log_rb.states_of_chunks[i]){
+      case CHUNK_LOCKED:
+        last_tail = log_rb.tail;
+        PeekResults chunkInf;
+        log_peek_chunk(&chunkInf);
+        log_rb.states_of_chunks[i] = CHUNK_IN_TRANSACTION;
+        
+        int DMA_send_status = SD_StartWriteBlock(START_BLOCK_NUM + sd_write_block_counter, chunkInf.dataPtr, 100);
+        if(DMA_send_status != HAL_OK){
+          log_rb.tail = last_tail;
+          log_rb.states_of_chunks[i] = CHUNK_LOCKED;
+        }
+        //processed_num++;
+        break;
+			case CHUNK_COMMITTED: 
+					SD_FinishWriteBlock();
+					sd_write_block_counter++;
+					log_rb.states_of_chunks[i] = CHUNK_FREE;
+
+					uint8_t chunk_id = curr_chunk(log_rb.tail);
+					log_rb.tail = chunk_start_ind((chunk_id + 1) % NUM_CHUNKS);
+
+					uint32_t start = chunk_start_ind(i);
+					log_rb.data[start + SD_CHUNK_SIZE - 1] = 0;
+					break;
+      case CHUNK_IN_TRANSACTION:
+        processed_num++;
+        break;
+    }
+  }
+  return processed_num;
+}
+
+static void write_state_act(uint8_t* raw)
+{
+  if(is_changed_state)
+  {
+    rb_init(&log_rb);
+    is_changed_state = 0u;
+  } 
+
+  for (int i = 0; i < NUM_MPU_SPI; ++i) {
+    if (mpu_read_registers(&hspi1, mpu_descriptors[i].cs_port, mpu_descriptors[i].cs_pin, ACCEL_XOUT_H_REG, raw, 14) == HAL_OK) 
+    {
+      process_mpu_data(&mpu_descriptors[i].mpu_state, raw);
+      uint16_t push_res = log_push_packet(i, &mpu_descriptors[i].mpu_state);	
+      if(push_res > 0){
+        send_mpu_data(i);
+      }
+      iterate_sent_chunks(); 
+    }
+  }
+}
+
+static void read_state_act()
+{
+  if(is_changed_state)  
+  { 
+    rb_init(&log_rb);
+    is_changed_state = 0u;
+  } 
+
+	
+	if(sd_write_block_counter != 0)
+	{
+    int code = SD_ReadBegin(START_BLOCK_NUM);
+    if(code < 0) {
+        return;
+    }
+    for (int i = 0; i < sd_write_block_counter; i++){
+      code = SD_ReadData(log_rb.data);
+      if(code >= 0)
+      {
+        uint8_t packet_num = log_rb.data[SD_CHUNK_SIZE-1];
+        if (packet_num == 0 || packet_num > MAX_BLOCK_BYTES_NUM/PACKET_SIZE){
+          continue;
+        }
+        parse_and_send_packets(log_rb.data, packet_num);
+      }
+    }
+
+    code = SD_ReadEnd();
+    if(code < 0) 
+    {
+        return;
+    }
+		
+		curr_state = WAIT_AFTER_READ;
+		sd_write_block_counter = 0;
+	}
+}
+
+static void poll_loop_spi(void)
+{
+  uint8_t raw_data[14];
+  while (1) 
+  {
+    switch(curr_state)
+    {
+      case NONE:
+        none_state_act(raw_data);
+        break;
+      case WRITE:
+        write_state_act(raw_data);
+        break;
+      case WAIT_AFTER_WRITE:
+        if(need_send)
+        {
+          need_send = iterate_sent_chunks();
+        }
+        break;
+      case READ:
+        read_state_act();
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+
+void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    if(hspi == &SD_SPI_PORT) {
+      for(int i = 0; i < NUM_CHUNKS; i++)
+      {
+        if(log_rb.states_of_chunks[i] == CHUNK_IN_TRANSACTION)
+        {
+          log_rb.states_of_chunks[i] = CHUNK_COMMITTED;
+        }
+      }
+    }
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+	if(GPIO_Pin == SWITCH_STATE_BTN_Pin)
+	{
+		uint32_t curr_click_ticks = HAL_GetTick();
+		if(curr_click_ticks - last_click_ticks >= MIN_CLICK_INTERVAL)
+		{
+			last_click_ticks = curr_click_ticks;
+			if(curr_state == WAIT_AFTER_WRITE && need_send != 0)
+			{
+					return;
+			}
+			
+			if(++curr_state == STATES_NUM)
+			{
+				curr_state = NONE;
+			}
+
+			is_changed_state = 1;
+		}
+	}
 }
 
 /* USER CODE END 0 */
@@ -254,13 +491,29 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
-  MX_I2C1_Init();
   MX_USART2_UART_Init();
-  MX_I2C2_Init();
+  MX_SPI1_Init();
+  MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
-  init_bus_ctx();
-	for (int i=0;i<4;i++) MPU_Init(mpus[i].i2c, mpus[i].addr);
-	poll_loop();
+		
+	last_click_ticks = HAL_GetTick();
+	SD_Init();
+	
+	rb_init(&log_rb);
+	
+  for (int i = 0; i < NUM_MPU_SPI; ++i) {
+      init_mpu(&hspi1, mpu_descriptors[i].cs_port, mpu_descriptors[i].cs_pin);
+  }
+	HAL_Delay(100);
+	for (int i = 0; i < NUM_MPU_SPI; ++i) 
+	{
+		mpu_descriptors[i].mpu_state.timer = HAL_GetTick();
+		
+		Kalman_Init(&mpu_descriptors[i].mpu_state.KalmanX);
+		Kalman_Init(&mpu_descriptors[i].mpu_state.KalmanY);
+	}
+	curr_state = NONE;
+  poll_loop_spi();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -315,70 +568,78 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief I2C1 Initialization Function
+  * @brief SPI1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_I2C1_Init(void)
+static void MX_SPI1_Init(void)
 {
 
-  /* USER CODE BEGIN I2C1_Init 0 */
+  /* USER CODE BEGIN SPI1_Init 0 */
 
-  /* USER CODE END I2C1_Init 0 */
+  /* USER CODE END SPI1_Init 0 */
 
-  /* USER CODE BEGIN I2C1_Init 1 */
+  /* USER CODE BEGIN SPI1_Init 1 */
 
-  /* USER CODE END I2C1_Init 1 */
-  hi2c1.Instance = I2C1;
-  hi2c1.Init.ClockSpeed = 400000;
-  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
-  hi2c1.Init.OwnAddress1 = 0;
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c1.Init.OwnAddress2 = 0;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_MASTER;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.NSS = SPI_NSS_SOFT;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_64;
+  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi1.Init.CRCPolynomial = 10;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN I2C1_Init 2 */
+  /* USER CODE BEGIN SPI1_Init 2 */
 
-  /* USER CODE END I2C1_Init 2 */
+  /* USER CODE END SPI1_Init 2 */
 
 }
 
 /**
-  * @brief I2C2 Initialization Function
+  * @brief SPI2 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_I2C2_Init(void)
+static void MX_SPI2_Init(void)
 {
 
-  /* USER CODE BEGIN I2C2_Init 0 */
+  /* USER CODE BEGIN SPI2_Init 0 */
 
-  /* USER CODE END I2C2_Init 0 */
+  /* USER CODE END SPI2_Init 0 */
 
-  /* USER CODE BEGIN I2C2_Init 1 */
+  /* USER CODE BEGIN SPI2_Init 1 */
 
-  /* USER CODE END I2C2_Init 1 */
-  hi2c2.Instance = I2C2;
-  hi2c2.Init.ClockSpeed = 400000;
-  hi2c2.Init.DutyCycle = I2C_DUTYCYCLE_2;
-  hi2c2.Init.OwnAddress1 = 0;
-  hi2c2.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c2.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c2.Init.OwnAddress2 = 0;
-  hi2c2.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c2.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c2) != HAL_OK)
+  /* USER CODE END SPI2_Init 1 */
+  /* SPI2 parameter configuration*/
+  hspi2.Instance = SPI2;
+  hspi2.Init.Mode = SPI_MODE_MASTER;
+  hspi2.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi2.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi2.Init.NSS = SPI_NSS_SOFT;
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32;
+  hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi2.Init.CRCPolynomial = 10;
+  if (HAL_SPI_Init(&hspi2) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN I2C2_Init 2 */
+  /* USER CODE BEGIN SPI2_Init 2 */
 
-  /* USER CODE END I2C2_Init 2 */
+  /* USER CODE END SPI2_Init 2 */
 
 }
 
@@ -425,12 +686,12 @@ static void MX_DMA_Init(void)
   __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
+  /* DMA1_Channel4_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel4_IRQn);
   /* DMA1_Channel5_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel5_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel5_IRQn);
-  /* DMA1_Channel7_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel7_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Channel7_IRQn);
 
 }
 
@@ -441,6 +702,7 @@ static void MX_DMA_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
@@ -450,6 +712,29 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, SD_CS_Pin|CS4_Pin|CS3_Pin|CS2_Pin
+                          |CS1_Pin|CS0_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin : SWITCH_STATE_BTN_Pin */
+  GPIO_InitStruct.Pin = SWITCH_STATE_BTN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(SWITCH_STATE_BTN_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : SD_CS_Pin CS4_Pin CS3_Pin CS2_Pin
+                           CS1_Pin CS0_Pin */
+  GPIO_InitStruct.Pin = SD_CS_Pin|CS4_Pin|CS3_Pin|CS2_Pin
+                          |CS1_Pin|CS0_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

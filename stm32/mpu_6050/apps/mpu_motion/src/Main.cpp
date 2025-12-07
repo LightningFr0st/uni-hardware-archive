@@ -4,24 +4,25 @@
 #include <cstdlib>
 
 #include "com_port_reader.h"
-#include "mpu_processor.h"
 
-static inline double deg2rad(double d) { return d * M_PI / 180.0; }
+static constexpr int NUM_LINKS{ 5 };
 
-static inline int index_of(int i2c, int addr)
+static constexpr char PORT_NAME[]{ "COM5" };
+
+static inline double deg2rad(double d)
 {
-	return (i2c & 1) * 2 + (addr & 1);
+	return d * M_PI / 180.0;
 }
-
-static const char PORT_NAME[] = "COM3";
 
 int main(int argc, char* argv[])
 {
+	using namespace mpu_6050;
+
 	const int WIN_W = 1280;
 	const int WIN_H = 720;
 
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
-		::std::fprintf(stderr, "SDL_Init error: %s\n", SDL_GetError());
+		fprintf(stderr, "SDL_Init error: %s\n", SDL_GetError());
 		return 1;
 	}
 
@@ -31,7 +32,7 @@ int main(int argc, char* argv[])
 		WIN_W, WIN_H, SDL_WINDOW_SHOWN);
 
 	if (!win) {
-		::std::fprintf(stderr, "SDL_CreateWindow error: %s\n", SDL_GetError());
+		fprintf(stderr, "SDL_CreateWindow error: %s\n", SDL_GetError());
 		SDL_Quit();
 		return 1;
 	}
@@ -39,30 +40,25 @@ int main(int argc, char* argv[])
 	SDL_Renderer* ren = SDL_CreateRenderer(
 		win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 	if (!ren) {
-		::std::fprintf(stderr, "SDL_CreateRenderer error: %s\n", SDL_GetError());
+		fprintf(stderr, "SDL_CreateRenderer error: %s\n", SDL_GetError());
 		SDL_DestroyWindow(win);
 		SDL_Quit();
 		return 1;
 	}
 
-	::std::array<::std::atomic<double>, 4> roll_deg;
+	array<atomic<double>, NUM_LINKS> roll_deg;
 	for (auto& a : roll_deg) a.store(0.0);
 
-	::mpu_6050::MpuProcessor mpu(false);
-	mpu.set_callback([&](::mpu_6050::MpuOutput const& out) {
-		const int idx = index_of(out.i2c, out.addr);
-		if (idx >= 0 && idx < 4) {
-			roll_deg[idx].store(out.KalmanAngleX, ::std::memory_order_relaxed);
+	ComPortReader reader;
+	reader.set_callback([&](MpuPacket const& pkt) {
+		if (pkt.mpu_addr >= 0 && pkt.mpu_addr <= 4)
+		{
+			roll_deg[pkt.mpu_addr].store(pkt.kx, memory_order_relaxed);
 		}
 		});
 
-	::mpu_6050::ComPortReader reader;
-	reader.set_callback([&](::mpu_6050::MpuPacket const& pkt) {
-		mpu.feed(pkt);
-		});
-
-	if (!reader.open(PORT_NAME)) {
-		::std::fprintf(stderr, "Failed to open %s\n", PORT_NAME);
+	if (!reader.open(PORT_NAME, 115200)) {
+		fprintf(stderr, "Failed to open %s\n", PORT_NAME);
 		SDL_DestroyRenderer(ren); SDL_DestroyWindow(win); SDL_Quit();
 		return 1;
 	}
@@ -79,15 +75,19 @@ int main(int argc, char* argv[])
 		const double maxH = (h - TOP_MARGIN - BOTTOM_MARGIN);
 		const double maxW = (w - baseX - RIGHT_MARGIN);
 
-		const double totalLen = 0.92 * ::std::min(maxH, maxW);
+		const double totalLen = 0.92 * min(maxH, maxW);
 
-		const double r1 = 0.30, r2 = 0.27, r3 = 0.23, r4 = 0.20;
-		return ::std::array<double, 4>{
-			totalLen* r1, totalLen* r2, totalLen* r3, totalLen* r4
+		const double r1 = 0.24, r2 = 0.22, r3 = 0.20, r4 = 0.16, r5 = 0.10;
+		return array<double, NUM_LINKS>{
+			totalLen* r1,
+				totalLen* r2,
+				totalLen* r3,
+				totalLen* r4,
+				totalLen* r5
 		};
 		};
 
-	::std::array<double, 4> L = compute_lengths(WIN_W, WIN_H);
+	array<double, NUM_LINKS> L = compute_lengths(WIN_W, WIN_H);
 
 	bool quit = false;
 	while (!quit) {
@@ -102,12 +102,13 @@ int main(int argc, char* argv[])
 
 		int w, h; SDL_GetRendererOutputSize(ren, &w, &h);
 
-		::std::array<double, 4> a_deg;
-		for (int i = 0; i < 4; ++i) a_deg[i] = roll_deg[i].load(::std::memory_order_relaxed);
+		array<double, NUM_LINKS> a_deg;
+		for (int i = 0; i < NUM_LINKS; ++i)
+			a_deg[i] = roll_deg[i].load(memory_order_relaxed);
 
-		::std::array<double, 4> a_rad{};
+		array<double, NUM_LINKS> a_rad{};
 		double acc = 0.0;
-		for (int i = 0; i < 4; ++i) {
+		for (int i = 0; i < NUM_LINKS; ++i) {
 			acc += a_deg[i];
 			a_rad[i] = deg2rad(acc);
 		}
@@ -116,14 +117,17 @@ int main(int argc, char* argv[])
 		const double baseY = h * 0.5;
 
 		struct Pt { double x, y; };
-		::std::array<Pt, 5> P;
-		P[0] = { baseX, baseY };
-		P[1] = { P[0].x + L[0] * ::std::cos(a_rad[0]), P[0].y - L[0] * ::std::sin(a_rad[0]) };
-		P[2] = { P[1].x + L[1] * ::std::cos(a_rad[1]), P[1].y - L[1] * ::std::sin(a_rad[1]) };
-		P[3] = { P[2].x + L[2] * ::std::cos(a_rad[2]), P[2].y - L[2] * ::std::sin(a_rad[2]) };
-		P[4] = { P[3].x + L[3] * ::std::cos(a_rad[3]), P[3].y - L[3] * ::std::sin(a_rad[3]) };
+		array<Pt, NUM_LINKS + 1> P;
 
-		auto toSDL = [](const Pt& q) { return SDL_Point{ (int)::std::lround(q.x), (int)::std::lround(q.y) }; };
+		P[0] = { baseX, baseY };
+		for (int i = 0; i < NUM_LINKS; ++i) {
+			const Pt& prev = P[i];
+			P[i + 1] = {
+				prev.x + L[i] * cos(a_rad[i]),
+				prev.y - L[i] * sin(a_rad[i])
+			};
+		}
+		auto toSDL = [](const Pt& q) { return SDL_Point{ (int)lround(q.x), (int)lround(q.y) }; };
 
 		SDL_SetRenderDrawColor(ren, 12, 12, 14, 255);
 		SDL_RenderClear(ren);
@@ -134,7 +138,7 @@ int main(int argc, char* argv[])
 			SDL_RenderDrawLine(ren, 0, y, w, y);
 
 		SDL_SetRenderDrawColor(ren, 230, 230, 230, 255);
-		for (int i = 0; i < 4; ++i) {
+		for (int i = 0; i < NUM_LINKS; ++i) {
 			SDL_Point a = toSDL(P[i]);
 			SDL_Point b = toSDL(P[i + 1]);
 			SDL_RenderDrawLine(ren, a.x, a.y, b.x, b.y);
@@ -146,7 +150,7 @@ int main(int argc, char* argv[])
 			SDL_RenderDrawLine(ren, s.x - 3, s.y, s.x + 3, s.y);
 			SDL_RenderDrawLine(ren, s.x, s.y - 3, s.x, s.y + 3);
 		}
-
+		SDL_Delay(10);
 		SDL_RenderPresent(ren);
 	}
 
