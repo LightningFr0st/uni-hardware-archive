@@ -7,16 +7,29 @@
 
 #ifndef INC_GY521_H_
 #define INC_GY521_H_
-
-#endif /* INC_GY521_H_ */
+#include "spi_utils.h"
 
 #include <stdint.h>
+
+#endif
+// Kalman structure
+typedef struct
+{
+    float Q_angle;
+    float Q_bias;
+    float R_measure;
+    float angle;
+    float bias;
+    float P[2][2];
+} Kalman_t;
 
 // MPU6050 structure
 typedef struct
 {
-
-    int16_t Accel_X_RAW;
+		Kalman_t KalmanX;
+		Kalman_t KalmanY;
+		
+	  int16_t Accel_X_RAW;
     int16_t Accel_Y_RAW;
     int16_t Accel_Z_RAW;
     double Ax;
@@ -29,24 +42,31 @@ typedef struct
     double Gx;
     double Gy;
     double Gz;
-
-    float Temperature;
-
+	
+		double   last_dt;
+	
+		uint32_t timer;
+	
     double KalmanAngleX;
-    double KalmanAngleY;
-} MPU6050_t;
+    double KalmanAngleY; // pitch
+} MPU6500_t;
 
-// Kalman structure
-typedef struct
+
+uint8_t init_mpu(SPI_HandleTypeDef* hspi, GPIO_TypeDef* cs_port, uint16_t cs_pin);
+
+void process_mpu_data(MPU6500_t* mpu_state, const uint8_t raw14[14]);
+
+static inline void Kalman_Init(Kalman_t *k)
 {
-    double Q_angle;
-    double Q_bias;
-    double R_measure;
-    double angle;
-    double bias;
-    double P[2][2];
-} Kalman_t;
+    k->Q_angle   = 0.001f;
+    k->Q_bias    = 0.003f;
+    k->R_measure = 0.03f;
 
-void MPU6050_Read_All(I2C_HandleTypeDef *I2Cx, MPU6050_t *DataStruct);
+    k->angle = 0.0f;
+    k->bias  = 0.0f;
 
-double Kalman_getAngle(Kalman_t *Kalman, double newAngle, double newRate, double dt);
+    k->P[0][0] = 0.0f;
+    k->P[0][1] = 0.0f;
+    k->P[1][0] = 0.0f;
+    k->P[1][1] = 0.0f;
+}

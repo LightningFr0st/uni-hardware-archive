@@ -67,6 +67,16 @@ void Error_Handler(void);
 #define TCK_GPIO_Port GPIOA
 #define SWO_Pin GPIO_PIN_3
 #define SWO_GPIO_Port GPIOB
+#define CS4_Pin GPIO_PIN_4
+#define CS4_GPIO_Port GPIOB
+#define CS3_Pin GPIO_PIN_5
+#define CS3_GPIO_Port GPIOB
+#define CS2_Pin GPIO_PIN_6
+#define CS2_GPIO_Port GPIOB
+#define CS1_Pin GPIO_PIN_8
+#define CS1_GPIO_Port GPIOB
+#define CS0_Pin GPIO_PIN_9
+#define CS0_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

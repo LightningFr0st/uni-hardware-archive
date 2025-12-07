@@ -1,5 +1,4 @@
 #include "MainFrame.h"
-#include "mpu_processor.h"
 
 #include <wx/sizer.h>
 #include <wx/settings.h>
@@ -12,6 +11,8 @@ wxEND_EVENT_TABLE()
 MainFrame::MainFrame(wxString const& title)
 	: wxFrame(nullptr, wxID_ANY, title)
 {
+	using namespace mpu_6050;
+
 	mainPanel = new wxPanel(this);
 
 	auto* vbox = new wxBoxSizer(wxVERTICAL);
@@ -26,7 +27,7 @@ MainFrame::MainFrame(wxString const& title)
 	for (int i = 0; i < 4; ++i) {
 		int const i2c = i / 2;
 		int const addr = i % 2;
-		::std::string const label = "I" + ::std::to_string(i2c) + "-A" + ::std::to_string(addr);
+		string const label = "I" + to_string(i2c) + "-A" + to_string(addr);
 		chartX->add_series(label, colors[i]);
 		chartY->add_series(label, colors[i]);
 	}
@@ -41,15 +42,10 @@ MainFrame::MainFrame(wxString const& title)
 	vbox->Add(chartY, 1, wxEXPAND | wxALL, this->FromDIP(4));
 	mainPanel->SetSizer(vbox);
 
-	processor = ::std::make_unique<::mpu_6050::MpuProcessor>();
-	processor->set_callback([this](::mpu_6050::MpuOutput const& o)
+	com_reader.set_callback([this](MpuPacket const& pkt)
 		{
-			int const idx = series_index(o.i2c, o.addr);
-			chartX->CallAfter([this, idx, o] { chartX->push_value(idx, o.KalmanAngleX); });
-			chartY->CallAfter([this, idx, o] { chartY->push_value(idx, o.KalmanAngleY); });
-		});
-	com_reader.set_callback([this](::mpu_6050::MpuPacket const& pkt) {
-		processor->feed(pkt);
+			chartX->CallAfter([this, pkt] { chartX->push_value(pkt.mpu_addr, pkt.kx); });
+			chartY->CallAfter([this, pkt] { chartY->push_value(pkt.mpu_addr, pkt.ky); });
 		});
 	com_reader.open("COM3");
 
@@ -61,15 +57,12 @@ MainFrame::~MainFrame()
 {
 	if (timer) { timer->Stop(); }
 	com_reader.close();
-	processor.reset();
 }
 
 void MainFrame::OnClose(wxCloseEvent& event)
 {
 	if (timer) { timer->Stop(); }
 	com_reader.close();
-	processor.reset();
-
 	Destroy();
 }
 

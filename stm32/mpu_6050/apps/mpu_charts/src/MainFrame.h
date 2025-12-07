@@ -7,11 +7,6 @@
 #include <array>
 #include <memory>
 
-namespace mpu_6050 
-{
-	class MpuProcessor;
-}
-
 class MainFrame : public wxFrame
 {
 public:
@@ -31,7 +26,6 @@ private:
 	wxTimer* timer{ nullptr };
 
 	::mpu_6050::ComPortReader com_reader;
-	std::unique_ptr<::mpu_6050::MpuProcessor> processor;
 
 	wxDECLARE_EVENT_TABLE();
 };

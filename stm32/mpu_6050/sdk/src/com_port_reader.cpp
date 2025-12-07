@@ -1,57 +1,58 @@
 #include "com_port_reader.h"
 
 #include <string>
+#include <charconv>
 
 namespace mpu_6050
 {
 	namespace
 	{
-		static inline int hexval(char c)
+		bool parse_text_line_to_packet(string_view line, MpuPacket& pkt)
 		{
-			if (c >= '0' && c <= '9') return c - '0';
-			if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-			if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-			return -1;
-		}
+			if (line.size() < 2 || line.front() != '#')
+				return false;
 
-		bool hex2byte(char hi, char lo, uint8_t& out)
-		{
-			int h = hexval(hi);
-			int l = hexval(lo);
-			if (h < 0 || l < 0) return false;
-			out = static_cast<uint8_t>((h << 4) | l);
-			return true;
-		}
+			line.remove_prefix(1);
 
-		bool parse_hex_line_to_packet(const char* hex34, MpuPacket& out)
-		{
-			uint8_t b[17];
-			for (int i = 0; i < 17; ++i) {
-				if (!hex2byte(hex34[2 * i], hex34[2 * i + 1], b[i]))
+			const auto h1 = line.find('#');
+			if (h1 == string_view::npos)
+				return false;
+
+			const auto h2 = line.find('#', h1 + 1);
+			if (h2 == string_view::npos)
+				return false;
+
+			string_view id_sv = line.substr(0, h1);
+			string_view kx_sv = line.substr(h1 + 1, h2 - (h1 + 1));
+			string_view ky_sv = line.substr(h2 + 1);
+
+			if (!ky_sv.empty() && ky_sv.back() == '\r')
+				ky_sv.remove_suffix(1);
+
+			int idx = 0;
+			float kx = 0.0f;
+			float ky = 0.0f;
+
+			{
+				const char* first = id_sv.data();
+				const char* last = id_sv.data() + id_sv.size();
+				auto res = from_chars(first, last, idx);
+				if (res.ec != errc{} || res.ptr != last)
 					return false;
 			}
 
-			uint8_t meta = b[0];
-			out.i2c = (meta & 0x01u);
-			out.addr = ((meta >> 1) & 0x01u);
+			try
+			{
+				kx = stof(string(kx_sv));
+				ky = stof(string(ky_sv));
+			}
+			catch (...) {
+				return false;
+			}
 
-			auto rd16 = [b](int idxLE)
-				{
-					return static_cast<int16_t>(static_cast<uint16_t>(b[idxLE]) | (static_cast<uint16_t>(b[idxLE + 1]) << 8));
-				};
-
-			out.ax = rd16(1);
-			out.ay = rd16(3);
-			out.az = rd16(5);
-
-			out.gx = rd16(7);
-			out.gy = rd16(9);
-			out.gz = rd16(11);
-
-			out.tick = static_cast<uint32_t>(b[13])
-				| (static_cast<uint32_t>(b[14]) << 8)
-				| (static_cast<uint32_t>(b[15]) << 16)
-				| (static_cast<uint32_t>(b[16]) << 24);
+			pkt.mpu_addr = idx;
+			pkt.kx = kx;
+			pkt.ky = ky;
 
 			return true;
 		}
@@ -115,7 +116,7 @@ namespace mpu_6050
 		PurgeComm(handle, PURGE_RXCLEAR | PURGE_TXCLEAR);
 
 		stop_flag = false;
-		reader_thread = ::std::thread(&ComPortReader::reader_thread_proc, this);
+		reader_thread = thread(&ComPortReader::reader_thread_proc, this);
 		return true;
 	}
 
@@ -133,9 +134,9 @@ namespace mpu_6050
 		}
 	}
 
-	void ComPortReader::set_callback(::std::function<void(MpuPacket const&)>&& cb)
+	void ComPortReader::set_callback(function<void(MpuPacket const&)>&& cb)
 	{
-		callback = ::std::move(cb);
+		callback = move(cb);
 	}
 
 	void ComPortReader::reader_thread_proc()
@@ -144,16 +145,16 @@ namespace mpu_6050
 		char chunk[CHUNK_SIZE];
 
 		size_t parse_pos = 0;
-		::std::string buffer;
+		string buffer;
 		buffer.reserve(4096);
 
-		while (!stop_flag.load(::std::memory_order_relaxed))
+		while (!stop_flag.load(memory_order_relaxed))
 		{
 			DWORD bytes_read = 0;
 
 			if (!ReadFile(handle, chunk, CHUNK_SIZE, &bytes_read, nullptr)) {
 				if (GetLastError() != ERROR_OPERATION_ABORTED) {
-					::std::this_thread::sleep_for(::std::chrono::milliseconds(10));
+					this_thread::sleep_for(chrono::milliseconds(10));
 				}
 				continue;
 			}
@@ -164,7 +165,7 @@ namespace mpu_6050
 			buffer.append(chunk, bytes_read);
 
 			size_t nl_pos = buffer.find('\n', parse_pos);
-			while (nl_pos != ::std::string::npos)
+			while (nl_pos != string::npos)
 			{
 				size_t line_start = parse_pos;
 				size_t line_end_exclusive = nl_pos;
@@ -174,9 +175,12 @@ namespace mpu_6050
 
 				size_t line_len = (line_end_exclusive > line_start) ? (line_end_exclusive - line_start) : 0;
 
-				if (line_len == 34 && callback) {
+				if (line_len > 0 && callback) {
+
 					MpuPacket pkt;
-					if (parse_hex_line_to_packet(buffer.data() + line_start, pkt)) {
+					string_view line_view(buffer.data() + line_start, line_len);
+
+					if (parse_text_line_to_packet(line_view, pkt)) {
 						callback(pkt);
 					}
 				}
