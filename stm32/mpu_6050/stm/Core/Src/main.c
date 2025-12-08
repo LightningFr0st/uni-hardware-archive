@@ -104,7 +104,12 @@ typedef struct __attribute__((packed)) {
 } LogPacket_t;
 
 #define LOG_BUFFER_SIZE 1024
+#define MAX_BLOCK_BYTES_NUM 504
+#define TXT_BUF_SIZE 1024
+#define PACKET_SIZE 9
 #define NUM_CHUNKS 2
+
+static char txt_buf[TXT_BUF_SIZE];
 
 typedef enum{
 	NONE,
@@ -114,29 +119,34 @@ typedef enum{
 } ProgState_t;
 
 typedef enum { 
-  CHUNK_COMMITTED, 
-  CHUNK_FREE, 
-  CHUNK_LOCKED
-} chunk_state_t;
+  CHUNK_FREE = 0,
+  CHUNK_COMMITTED = 1, 
+  CHUNK_LOCKED = -1,
+  CHUNK_INIT = 2,
+} Chunk_state_t;
+
+typedef enum { 
+  PUSH_INF = CHUNK_FREE, 
+  POP_INF = CHUNK_COMMITTED,
+  _MAIN_OPRTN_NUM = 2,
+  PEEK_INF = 3
+} Buf_data_operation;
 
 
 typedef struct {
     uint8_t  data[LOG_BUFFER_SIZE];
-    uint16_t buf_ptrs[NUM_CHUNKS];
-    //uint8_t state_chunks[NUM_CHUNKS];
-    //uint16_t head;
-    //uint16_t tail;
-    // uint8_t  full;
+    uint16_t buf_ptrs[_MAIN_OPRTN_NUM];
 	
-  //  uint8_t free_chunk;
-    //uint8_t committed_chunk;
-		volatile uint8_t chunk_states[NUM_CHUNKS];
+		volatile uint8_t states_of_chunks[NUM_CHUNKS]; // 1 chunk - free, 2 - ...
+    volatile uint8_t expected_chunks[_MAIN_OPRTN_NUM]; // there are 2 states (either readable or writable)
+
 	
 } RingBuffer_t;
 
 
 static volatile ProgState_t curr_state = NONE;
 static volatile uint8_t sd_initialized = 0; //*
+static volatile uint8_t is_changed_state = 0;
 static volatile uint32_t sd_write_block_counter = 0;
 static volatile uint32_t sd_read_block_counter = 0; //*
 static volatile uint8_t sd_read_complete = 0;
@@ -155,14 +165,16 @@ static RingBuffer_t log_rb;
 
 static void rb_init(RingBuffer_t *rb)
 {
-    rb->head = 0;
-    rb->tail = 0;
-    //rb->full = 0;
+    for (int i=0; i<_MAIN_OPRTN_NUM; i++)
+    {
+      rb->buf_ptrs[i] = CHUNK_FREE;
+      rb->expected_chunks[i] = 0; 
+    } 
 
-    rb->free_chunk = 0;
-    rb->committed_chunk = 0;
-    for (int i=0; i<NUM_CHUNKS; i++) 
-      rb->chunk_states[i] = CHUNK_FREE;
+    for (int i=0; i<NUM_CHUNKS; i++)
+    {
+      rb->states_of_chunks[i] = CHUNK_FREE;
+    }
 
 }
 
@@ -182,117 +194,112 @@ static inline uint8_t next_chunk(uint8_t chunk_id)
 }
 
 
-// static uint8_t rb_empty(const RingBuffer_t *rb)
-// {
-//     return (!rb->full && (rb->head == rb->tail));
-// }
-
-// static uint16_t rb_size(const RingBuffer_t *rb) // busy
-// {
-//     if (rb->full) return LOG_BUFFER_SIZE;
-
-//     if (rb->head >= rb->tail)
-//         return rb->head - rb->tail;
-//     else
-//         return LOG_BUFFER_SIZE - rb->tail + rb->head;
-// }
-
-// static uint16_t rb_free_space(const RingBuffer_t *rb)
-// {
-//     return LOG_BUFFER_SIZE - rb_size(rb);
-// }
-
-// static uint16_t rb_free_chunk_space(const RingBuffer_t *rb, uint16_t chunk_bound)
-// {
-//     return chunk_bound - rb->head;
-// }
-
-static uint8_t rb_push_bytes(RingBuffer_t *rb, const uint8_t *src, uint16_t len)
+static int16_t rb_manage_bytes(
+  RingBuffer_t *rb,
+  uint8_t * data,
+  uint16_t len,
+  Buf_data_operation oprtn_detailed
+)
 {
-    if (len == 0 || len > MAX_BLOCK_BYTES_NUM) return 0; //*? MAX_BLOCK_BYTES_NUM
-    uint8_t curr_free_chunk = rb->free_chunk;
-    if (rb->chunk_states[curr_free_chunk] != CHUNK_FREE)
+  Buf_data_operation oprtn_type = oprtn_detailed % 2;
+  if (len == 0 || len > MAX_BLOCK_BYTES_NUM)
+    return 0;
+
+  uint8_t operated_chunk = rb->expected_chunks[oprtn_type]; 
+
+  if (rb->states_of_chunks[operated_chunk] != oprtn_type) 
+    return 0;
+
+
+  uint32_t start = chunk_start_ind(operated_chunk);
+
+  uint32_t bound = chunk_end_bound(operated_chunk);
+	uint16_t* bufIndPtr = &rb->buf_ptrs[oprtn_type];
+	uint16_t bufInd = *bufIndPtr;
+
+  if (!(bufInd >= start && bufInd < bound)) { 
+
+    bufInd = (uint16_t) start;
+    *bufIndPtr = bufInd;
+
+  }
+
+  uint32_t offset_in_chunk = bufInd - start;
+  uint32_t avail = MAX_BLOCK_BYTES_NUM - offset_in_chunk;
+
+  uint16_t res;
+  if(oprtn_type == PUSH_INF)
+  {
+    if (len > avail) 
+    {
+      if(len < PACKET_SIZE)
+      {
+        rb->states_of_chunks[operated_chunk] = oprtn_type-1;
+        return CHUNK_LOCKED;
+      }
       return 0;
-    
-    uint32_t start = chunk_start_ind(curr_free_chunk); //*
-    uint32_t bound = chunk_end_bound(curr_free_chunk);
 
-    if (!(rb->head >= start && rb->head < bound)) {
-        rb->head = (uint16_t) start;
     }
-
-    uint32_t offset_in_chunk = rb->head - start;
-    uint32_t avail = MAX_BLOCK_BYTES_NUM - offset_in_chunk; //*? MAX_BLOCK_BYTES_NUM
-
-    if (len > avail) return 0;
-    
+      
     for (uint16_t i = 0; i < len; ++i) {
-        rb->data[rb->head++] = src[i];
+        rb->data[bufInd++] = data[i];
     }
-
-    if (rb->head == bound) {
-        rb->chunk_states[curr_free_chunk] = CHUNK_LOCKED;
-        // toggle to next chunk
-        uint8_t next_chunk_ind = next_chunk(curr_free_chunk);
-        rb->free_chunk = next_chunk_ind;
-        rb->head = (uint16_t) chunk_start_ind(next_chunk_ind);
+    //*bufIndPtr = bufInd;
+    res = 1;
+  }
+  else
+  {
+    if (len > avail) 
+      len = avail;
+    for (uint16_t i = 0; i < len; ++i) {
+      if(oprtn_detailed == PEEK_INF)
+      {
+        // *bufIndPtr = bufInd; 
+        return len;
+      }
+      if(data != NULL)
+      {
+        data[i] = rb->data[bufInd++];
+      }
     }
+    //*bufIndPtr = bufInd;
+    res = len;
+  }
 
-    return 1;
+  if (bufInd == bound) {
+
+    rb->states_of_chunks[operated_chunk] = oprtn_type-1; 
+    
+    // toggle to next chunk
+    uint8_t next_chunk_ind = next_chunk(operated_chunk);
+
+    rb->expected_chunks[oprtn_type] = next_chunk_ind;
+
+    *bufIndPtr = (uint16_t) chunk_start_ind(next_chunk_ind);
+
+  }
+  else
+  {
+    *bufIndPtr = bufInd;
+  }
+
+  return res; 
+
 }
 
 
-static uint16_t rb_pop_bytes(RingBuffer_t *rb, uint8_t *dst, uint16_t len)
-{
-    if (len == 0 || len > MAX_BLOCK_BYTES_NUM) return 0; 
-    uint8_t curr_committed_chunk = rb->committed_chunk;
-    if (rb->chunk_states[curr_committed_chunk] != CHUNK_COMMITTED)
-      return 0;
-    
-  //committed_chunk
-    uint32_t start = chunk_start_ind(curr_committed_chunk); 
-    uint32_t bound = chunk_end_bound(curr_committed_chunk);
-
-    if (!(rb->tail >= start && rb->tail < bound)) {
-        rb->tail = (uint16_t) start;
-    }
-
-    uint32_t offset_in_chunk = rb->tail - start;
-    uint32_t avail = MAX_BLOCK_BYTES_NUM - offset_in_chunk;
-
-    if (len > avail) return 0; // or trunc?
-
-    for (uint16_t i = 0; i < len; ++i) {
-        dst[i] = rb->data[rb->tail++];
-    }
-
-     if (rb->tail == bound) {
-        rb->chunk_states[curr_committed_chunk] = CHUNK_FREE;
-        // toggle to next chunk
-        uint8_t next_chunk_ind = next_chunk(curr_committed_chunk);
-        rb->committed_chunk = next_chunk_ind;
-        rb->tail = (uint16_t) chunk_start_ind(next_chunk_ind);
-    }
-
-    return len;
-}
-
-static void log_push_packet(uint8_t mpu_idx, const MPU6500_t *mpu_state)
+static int16_t log_push_packet(uint8_t mpu_idx, const MPU6500_t *mpu_state)
 {
 	
     LogPacket_t pkt;
     pkt.mpu_id = mpu_idx;
-    pkt.kx     = (float)mpu_state->KalmanAngleX;
-    pkt.ky     = (float)mpu_state->KalmanAngleY;
+    pkt.kx = (float)mpu_state->KalmanAngleX;
+    pkt.ky = (float)mpu_state->KalmanAngleY;
 
-    (void)rb_push_bytes(&log_rb, (const uint8_t *)&pkt, sizeof(pkt));
-
+    return rb_manage_bytes(&log_rb, (uint8_t *) &pkt, sizeof(pkt), PUSH_INF);
 }
 
-static bool try_push_packet(uint8_t mpu_idx, const MPU6500_t *mpu_state)
-{
 
-}
 
 
 static HAL_StatusTypeDef mpu_spi_read_regs(MPUDescriptor *s, uint8_t reg, uint8_t *dst, uint16_t len)
@@ -354,19 +361,65 @@ void dma_callback(void)
 	current_chunk = 1;
 }
 
-static void log_flush_half_if_needed(void)
+
+
+void parse_and_send_packets(const uint8_t *data, uint16_t len)
 {
-    const uint16_t chunk = LOG_BUFFER_SIZE / 2; // 512
-    if (rb_size(&log_rb) >= chunk) {
-				
-        uint8_t out[chunk];
-        uint16_t n = rb_pop_bytes(&log_rb, out, chunk);
-        if (n > 0) 
-				{	
-            HAL_UART_Transmit(&huart2, out, n, HAL_MAX_DELAY);
+    const size_t pkt_size = sizeof(LogPacket_t);
+    uint16_t count = len / pkt_size;
+    if (count == 0) 
+      return;
+  
+    char *out = txt_buf;
+    size_t rem = TXT_BUF_SIZE;
+
+    for (uint16_t i = 0; i < count; ++i) {
+        LogPacket_t pkt;
+        memcpy(&pkt, data + i * pkt_size, pkt_size);
+
+        int need = snprintf(out, rem, "#%d#%.4f#%.4f\r\n",
+                            pkt.mpu_id, pkt.kx, pkt.ky);
+
+        if (need < 0) {
+            break;
         }
+
+        if ((size_t)need >= rem) {
+            HAL_UART_Transmit(&huart2, (uint8_t*)txt_buf, (uint16_t)(TXT_BUF_SIZE - rem), HAL_MAX_DELAY);
+            // сброс
+            out = txt_buf;
+            rem = TXT_BUF_SIZE;
+        }
+        out += need;
+        rem -= (size_t)need;
+    }
+
+    // отправляем остаток если есть
+    size_t used = TXT_BUF_SIZE - rem;
+    if (used > 0) {
+        HAL_UART_Transmit(&huart2, (uint8_t*)txt_buf, (uint16_t)used, HAL_MAX_DELAY);
     }
 }
+
+static uint16_t log_peek_chunk(uint8_t **pIndPtr)
+{
+    *pIndPtr = log_rb.data + log_rb.buf_ptrs[POP_INF];
+    return rb_manage_bytes(&log_rb, NULL, SD_CHUNK_SIZE, PEEK_INF);
+}
+
+//static void log_flush_half(void) //*
+//{
+//    if (rb_size(&log_rb) >= SD_CHUNK_SIZE) {
+//				
+//        uint8_t out[SD_CHUNK_SIZE];
+//        uint16_t n = rb_pop_bytes(&log_rb, out, SD_CHUNK_SIZE);
+//        if (n > 0) 
+//				{	
+//          //* PARSE
+//            HAL_UART_Transmit(&huart2, out, n, HAL_MAX_DELAY);
+//        }
+//    }
+//}
 
 
 static void send_mpu_data(uint8_t idx)
@@ -385,7 +438,7 @@ static void send_mpu_data(uint8_t idx)
 		
     if (len > 0 && len < (int)sizeof(buf)) 
 		{
-        //*DEBUG//*was //HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)len, 100);
+        HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)len, 100);
     }
 }
 
@@ -407,12 +460,44 @@ static void poll_loop_spi(void)
                   send_mpu_data(i);
                   break;
                 case WRITE:
-                  process_mpu_data(&mpu_descriptors[i].mpu_state, raw_data);
-                  log_push_packet(i, &mpu_descriptors[i].mpu_state);										
+                  if(is_changed_state)
+                  {
+                    rb_init(&log_rb);
+                    memset(log_rb.data, 0, sizeof(log_rb.data));
+                    is_changed_state = 0u;
+                  } 
+                  process_mpu_data(&mpu_descriptors[i].mpu_state, raw_data);	
+                  int16_t res = log_push_packet(i, &mpu_descriptors[i].mpu_state);
+                  if(res == CHUNK_LOCKED || curr_state == READ)
+                  {
+                    uint8_t * peekedIndPtr;
+                    uint16_t peekedLength = log_peek_chunk(&peekedIndPtr);
+                    if (peekedLength > 0) 
+                    {	
+                        // SD
+                        parse_and_send_packets(peekedIndPtr, peekedLength);
+                    }
+                    memset(log_rb.data, 0, sizeof(log_rb.data));
+                  }
                   break;
-								}
+                case READ:
+                  if(is_changed_state)  
+                  { 
+                    rb_init(&log_rb);
+                    memset(log_rb.data, 0, sizeof(log_rb.data));
+                    is_changed_state = 0u;
+                  } 
 
-
+                  // SD READ
+                  uint8_t * peekedIndPtr;
+                  uint16_t peekedLength = log_peek_chunk(&peekedIndPtr);
+                    if (peekedLength > 0) 
+                    {	
+                        parse_and_send_packets(peekedIndPtr, peekedLength);
+                    }
+                    memset(log_rb.data, 0, sizeof(log_rb.data));
+                  break;
+              }
 
                 // process_mpu_data(&mpu_descriptors[i].mpu_state, raw_data);
 								// 		log_push_packet(i, &mpu_descriptors[i].mpu_state);	

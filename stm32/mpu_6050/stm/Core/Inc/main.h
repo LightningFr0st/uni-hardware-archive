@@ -83,7 +83,7 @@ void Error_Handler(void);
 #define CS0_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
-#define MAX_BLOCK_BYTES_NUM 508
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
