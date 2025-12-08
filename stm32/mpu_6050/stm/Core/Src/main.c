@@ -27,6 +27,9 @@
 #include "math.h"
 
 #include "mpu6050.h"
+
+#include "sd.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -56,6 +59,9 @@
 
 /* Private variables ---------------------------------------------------------*/
 SPI_HandleTypeDef hspi1;
+SPI_HandleTypeDef hspi2;
+DMA_HandleTypeDef hdma_spi2_rx;
+DMA_HandleTypeDef hdma_spi2_tx;
 
 UART_HandleTypeDef huart2;
 
@@ -66,8 +72,10 @@ UART_HandleTypeDef huart2;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_SPI2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -96,17 +104,42 @@ typedef struct __attribute__((packed)) {
 } LogPacket_t;
 
 #define LOG_BUFFER_SIZE 1024
+#define NUM_CHUNKS 2
+
+typedef enum{
+	NONE,
+	WRITE,
+	READ,
+	SIZE
+} ProgState_t;
+
+typedef enum { 
+  CHUNK_COMMITTED, 
+  CHUNK_FREE, 
+  CHUNK_LOCKED
+} chunk_state_t;
+
 
 typedef struct {
     uint8_t  data[LOG_BUFFER_SIZE];
-    uint16_t head;
-    uint16_t tail;
-    uint8_t  full;
+    uint16_t buf_ptrs[NUM_CHUNKS];
+    //uint8_t state_chunks[NUM_CHUNKS];
+    //uint16_t head;
+    //uint16_t tail;
+    // uint8_t  full;
 	
-		volatile uint8_t chunc_states[2];
-		
+  //  uint8_t free_chunk;
+    //uint8_t committed_chunk;
+		volatile uint8_t chunk_states[NUM_CHUNKS];
 	
 } RingBuffer_t;
+
+
+static volatile ProgState_t curr_state = NONE;
+static volatile uint8_t sd_initialized = 0; //*
+static volatile uint32_t sd_write_block_counter = 0;
+static volatile uint32_t sd_read_block_counter = 0; //*
+static volatile uint8_t sd_read_complete = 0;
 
 static MPUDescriptor mpu_descriptors[5] = {
     { {0}, CS0_GPIO_Port, CS0_Pin },
@@ -118,64 +151,129 @@ static MPUDescriptor mpu_descriptors[5] = {
 
 static RingBuffer_t log_rb;
 
+
+
 static void rb_init(RingBuffer_t *rb)
 {
     rb->head = 0;
     rb->tail = 0;
-    rb->full = 0;
+    //rb->full = 0;
+
+    rb->free_chunk = 0;
+    rb->committed_chunk = 0;
+    for (int i=0; i<NUM_CHUNKS; i++) 
+      rb->chunk_states[i] = CHUNK_FREE;
+
 }
 
-static uint8_t rb_empty(const RingBuffer_t *rb)
-{
-    return (!rb->full && (rb->head == rb->tail));
+static inline uint32_t chunk_start_ind(uint8_t chunk_id)
+{ 
+  return (uint32_t)chunk_id * SD_CHUNK_SIZE; 
 }
 
-static uint16_t rb_size(const RingBuffer_t *rb)
-{
-    if (rb->full) return LOG_BUFFER_SIZE;
-
-    if (rb->head >= rb->tail)
-        return rb->head - rb->tail;
-    else
-        return LOG_BUFFER_SIZE - rb->tail + rb->head;
+static inline uint32_t chunk_end_bound(uint8_t chunk_id)
+{ 
+  return chunk_start_ind(chunk_id) + MAX_BLOCK_BYTES_NUM; //*? MAX_BLOCK_BYTES_NUM
 }
 
-static uint16_t rb_free_space(const RingBuffer_t *rb)
-{
-    return LOG_BUFFER_SIZE - rb_size(rb);
+static inline uint8_t next_chunk(uint8_t chunk_id)
+{ 
+  return (chunk_id + 1) % NUM_CHUNKS; 
 }
+
+
+// static uint8_t rb_empty(const RingBuffer_t *rb)
+// {
+//     return (!rb->full && (rb->head == rb->tail));
+// }
+
+// static uint16_t rb_size(const RingBuffer_t *rb) // busy
+// {
+//     if (rb->full) return LOG_BUFFER_SIZE;
+
+//     if (rb->head >= rb->tail)
+//         return rb->head - rb->tail;
+//     else
+//         return LOG_BUFFER_SIZE - rb->tail + rb->head;
+// }
+
+// static uint16_t rb_free_space(const RingBuffer_t *rb)
+// {
+//     return LOG_BUFFER_SIZE - rb_size(rb);
+// }
+
+// static uint16_t rb_free_chunk_space(const RingBuffer_t *rb, uint16_t chunk_bound)
+// {
+//     return chunk_bound - rb->head;
+// }
 
 static uint8_t rb_push_bytes(RingBuffer_t *rb, const uint8_t *src, uint16_t len)
 {
-    if (len > LOG_BUFFER_SIZE) return 0;
-    if (rb_free_space(rb) < len) return 0;
+    if (len == 0 || len > MAX_BLOCK_BYTES_NUM) return 0; //*? MAX_BLOCK_BYTES_NUM
+    uint8_t curr_free_chunk = rb->free_chunk;
+    if (rb->chunk_states[curr_free_chunk] != CHUNK_FREE)
+      return 0;
+    
+    uint32_t start = chunk_start_ind(curr_free_chunk); //*
+    uint32_t bound = chunk_end_bound(curr_free_chunk);
 
-    for (uint16_t i = 0; i < len; ++i) {
-        rb->data[rb->head] = src[i];
-        rb->head++;
-        if (rb->head == LOG_BUFFER_SIZE)
-            rb->head = 0;
+    if (!(rb->head >= start && rb->head < bound)) {
+        rb->head = (uint16_t) start;
     }
 
-    if (rb->head == rb->tail)
-        rb->full = 1;
+    uint32_t offset_in_chunk = rb->head - start;
+    uint32_t avail = MAX_BLOCK_BYTES_NUM - offset_in_chunk; //*? MAX_BLOCK_BYTES_NUM
+
+    if (len > avail) return 0;
+    
+    for (uint16_t i = 0; i < len; ++i) {
+        rb->data[rb->head++] = src[i];
+    }
+
+    if (rb->head == bound) {
+        rb->chunk_states[curr_free_chunk] = CHUNK_LOCKED;
+        // toggle to next chunk
+        uint8_t next_chunk_ind = next_chunk(curr_free_chunk);
+        rb->free_chunk = next_chunk_ind;
+        rb->head = (uint16_t) chunk_start_ind(next_chunk_ind);
+    }
 
     return 1;
 }
 
+
 static uint16_t rb_pop_bytes(RingBuffer_t *rb, uint8_t *dst, uint16_t len)
 {
-    uint16_t avail = rb_size(rb);
-    if (len > avail) len = avail;
+    if (len == 0 || len > MAX_BLOCK_BYTES_NUM) return 0; 
+    uint8_t curr_committed_chunk = rb->committed_chunk;
+    if (rb->chunk_states[curr_committed_chunk] != CHUNK_COMMITTED)
+      return 0;
+    
+  //committed_chunk
+    uint32_t start = chunk_start_ind(curr_committed_chunk); 
+    uint32_t bound = chunk_end_bound(curr_committed_chunk);
 
-    for (uint16_t i = 0; i < len; ++i) {
-        dst[i] = rb->data[rb->tail];
-        rb->tail++;
-        if (rb->tail == LOG_BUFFER_SIZE)
-            rb->tail = 0;
+    if (!(rb->tail >= start && rb->tail < bound)) {
+        rb->tail = (uint16_t) start;
     }
 
-    rb->full = 0;
+    uint32_t offset_in_chunk = rb->tail - start;
+    uint32_t avail = MAX_BLOCK_BYTES_NUM - offset_in_chunk;
+
+    if (len > avail) return 0; // or trunc?
+
+    for (uint16_t i = 0; i < len; ++i) {
+        dst[i] = rb->data[rb->tail++];
+    }
+
+     if (rb->tail == bound) {
+        rb->chunk_states[curr_committed_chunk] = CHUNK_FREE;
+        // toggle to next chunk
+        uint8_t next_chunk_ind = next_chunk(curr_committed_chunk);
+        rb->committed_chunk = next_chunk_ind;
+        rb->tail = (uint16_t) chunk_start_ind(next_chunk_ind);
+    }
+
     return len;
 }
 
@@ -188,7 +286,14 @@ static void log_push_packet(uint8_t mpu_idx, const MPU6500_t *mpu_state)
     pkt.ky     = (float)mpu_state->KalmanAngleY;
 
     (void)rb_push_bytes(&log_rb, (const uint8_t *)&pkt, sizeof(pkt));
+
 }
+
+static bool try_push_packet(uint8_t mpu_idx, const MPU6500_t *mpu_state)
+{
+
+}
+
 
 static HAL_StatusTypeDef mpu_spi_read_regs(MPUDescriptor *s, uint8_t reg, uint8_t *dst, uint16_t len)
 {
@@ -280,7 +385,7 @@ static void send_mpu_data(uint8_t idx)
 		
     if (len > 0 && len < (int)sizeof(buf)) 
 		{
-        HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)len, 100);
+        //*DEBUG//*was //HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)len, 100);
     }
 }
 
@@ -295,15 +400,42 @@ static void poll_loop_spi(void)
         for (int i = 0; i < NUM_MPU_SPI; ++i) {
             if (mpu_spi_read_regs(&mpu_descriptors[i], ACCEL_XOUT_H_REG, raw_data, 14) == HAL_OK) 
 						{
-                process_mpu_data(&mpu_descriptors[i].mpu_state, raw_data);
-							  log_push_packet(i, &mpu_descriptors[i].mpu_state);	
-								send_mpu_data(i);
+              switch(curr_state){
+                case NONE:
+                  process_mpu_data(&mpu_descriptors[i].mpu_state, raw_data);
+                  //log_push_packet(i, &mpu_descriptors[i].mpu_state);	
+                  send_mpu_data(i);
+                  break;
+                case WRITE:
+                  process_mpu_data(&mpu_descriptors[i].mpu_state, raw_data);
+                  log_push_packet(i, &mpu_descriptors[i].mpu_state);										
+                  break;
+								}
+
+
+
+                // process_mpu_data(&mpu_descriptors[i].mpu_state, raw_data);
+								// 		log_push_packet(i, &mpu_descriptors[i].mpu_state);	
+								// 		send_mpu_data(i);
 								
-								//process_and_send(raw_data);
             }
         }
     }
 }
+
+static const uint32_t StartBlockNum = 0x00ABCD;
+
+static void initSD(void)
+{
+	int sdInitCode;
+	sdInitCode	= SD_Init(); //add error logic
+	uint32_t blocksNum;
+	sdInitCode = SD_GetBlocksNumber(&blocksNum); //add error logic	
+}
+
+
+
+
 
 /* USER CODE END 0 */
 
@@ -336,11 +468,15 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_USART2_UART_Init();
   MX_SPI1_Init();
-	
+  MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
 		
+	initSD();
+	
+	
 	rb_init(&log_rb);
 	
   for (int i = 0; i < NUM_MPU_SPI; ++i) {
@@ -448,6 +584,44 @@ static void MX_SPI1_Init(void)
 }
 
 /**
+  * @brief SPI2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI2_Init(void)
+{
+
+  /* USER CODE BEGIN SPI2_Init 0 */
+
+  /* USER CODE END SPI2_Init 0 */
+
+  /* USER CODE BEGIN SPI2_Init 1 */
+
+  /* USER CODE END SPI2_Init 1 */
+  /* SPI2 parameter configuration*/
+  hspi2.Instance = SPI2;
+  hspi2.Init.Mode = SPI_MODE_MASTER;
+  hspi2.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi2.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi2.Init.NSS = SPI_NSS_SOFT;
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32;
+  hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi2.Init.CRCPolynomial = 10;
+  if (HAL_SPI_Init(&hspi2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI2_Init 2 */
+
+  /* USER CODE END SPI2_Init 2 */
+
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -481,6 +655,25 @@ static void MX_USART2_UART_Init(void)
 }
 
 /**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel4_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel4_IRQn);
+  /* DMA1_Channel5_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel5_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -499,13 +692,19 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, CS4_Pin|CS3_Pin|CS2_Pin|CS1_Pin
-                          |CS0_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOB, SD_CS_Pin|CS4_Pin|CS3_Pin|CS2_Pin
+                          |CS1_Pin|CS0_Pin, GPIO_PIN_SET);
 
-  /*Configure GPIO pins : CS4_Pin CS3_Pin CS2_Pin CS1_Pin
-                           CS0_Pin */
-  GPIO_InitStruct.Pin = CS4_Pin|CS3_Pin|CS2_Pin|CS1_Pin
-                          |CS0_Pin;
+  /*Configure GPIO pin : STATE_SWITCH_Pin */
+  GPIO_InitStruct.Pin = STATE_SWITCH_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(STATE_SWITCH_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : SD_CS_Pin CS4_Pin CS3_Pin CS2_Pin
+                           CS1_Pin CS0_Pin */
+  GPIO_InitStruct.Pin = SD_CS_Pin|CS4_Pin|CS3_Pin|CS2_Pin
+                          |CS1_Pin|CS0_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;

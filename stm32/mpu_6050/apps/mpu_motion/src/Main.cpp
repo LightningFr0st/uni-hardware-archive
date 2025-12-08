@@ -7,7 +7,7 @@
 
 static constexpr int NUM_LINKS{ 5 };
 
-static constexpr char PORT_NAME[]{ "COM3" };
+static constexpr char PORT_NAME[]{ "COM5" };
 
 static inline double deg2rad(double d)
 {
