@@ -468,6 +468,7 @@ static void poll_loop_spi(void)
                   } 
                   process_mpu_data(&mpu_descriptors[i].mpu_state, raw_data);	
                   int16_t res = log_push_packet(i, &mpu_descriptors[i].mpu_state);
+                  
                   if(res == CHUNK_LOCKED || curr_state == READ)
                   {
                     uint8_t * peekedIndPtr;
@@ -475,6 +476,8 @@ static void poll_loop_spi(void)
                     if (peekedLength > 0) 
                     {	
                         // SD
+                        
+                        
                         parse_and_send_packets(peekedIndPtr, peekedLength);
                     }
                     memset(log_rb.data, 0, sizeof(log_rb.data));
@@ -780,11 +783,11 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOB, SD_CS_Pin|CS4_Pin|CS3_Pin|CS2_Pin
                           |CS1_Pin|CS0_Pin, GPIO_PIN_SET);
 
-  /*Configure GPIO pin : STATE_SWITCH_Pin */
-  GPIO_InitStruct.Pin = STATE_SWITCH_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  /*Configure GPIO pin : SWITCH_STATE_BTN_Pin */
+  GPIO_InitStruct.Pin = SWITCH_STATE_BTN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(STATE_SWITCH_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(SWITCH_STATE_BTN_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : SD_CS_Pin CS4_Pin CS3_Pin CS2_Pin
                            CS1_Pin CS0_Pin */
@@ -794,6 +797,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
