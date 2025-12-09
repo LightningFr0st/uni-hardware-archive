@@ -60,20 +60,20 @@ static int SD_WaitDataToken(uint8_t token) {
 static int SD_ReadBytes(uint8_t* buff, size_t buff_size, uint32_t buf_timeout) {
     //* dma
     spi_done = 0;
-    if(HAL_SPI_TransmitReceive(&SD_SPI_PORT, tx_ff, buff, buff_size, HAL_MAX_DELAY) != HAL_OK)
+    if(HAL_SPI_TransmitReceive_DMA(&SD_SPI_PORT, tx_ff, buff, buff_size) != HAL_OK)
     {
         return -1;
     }
 
-//    uint32_t spi_start_time = HAL_GetTick();
-//		while(!spi_done) {
-//				uint32_t curr_time = HAL_GetTick();
-//        if((curr_time - spi_start_time) > buf_timeout) {
-//            HAL_SPI_Abort(&SD_SPI_PORT);
-//            return -2; // timeout
-//        }
-//        __WFI();
-//		}
+   uint32_t spi_start_time = HAL_GetTick();
+		while(!spi_done) {
+				uint32_t curr_time = HAL_GetTick();
+       if((curr_time - spi_start_time) > buf_timeout) {
+           HAL_SPI_Abort(&SD_SPI_PORT);
+           return -2; // timeout
+       }
+       __WFI();
+		}
 
     return 0;
 }
