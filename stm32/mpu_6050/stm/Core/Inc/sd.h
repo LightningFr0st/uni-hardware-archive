@@ -19,7 +19,7 @@ void SD_Unselect();
 // all procedures return 0 on success, < 0 on failure
 
 int SD_Init();
-int SD_ReadSingleBlock(uint32_t blockNum, uint8_t* buff); // sizeof(buff) == 512!
+int SD_ReadSingleBlock(uint32_t blockNum, uint8_t* buff);
 
 int SD_StartWriteBlock(uint32_t blockNum, const uint8_t* buff, uint32_t buf_timeout);
 int SD_FinishWriteBlock();

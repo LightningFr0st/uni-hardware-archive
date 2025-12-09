@@ -1,12 +1,25 @@
 
 
 #ifndef INC_GY521_H_
+
 #define INC_GY521_H_
+
 #include "spi_utils.h"
 
 #include <stdint.h>
 
-#endif
+// MPU registers
+
+#define WHO_AM_I_REG 0x75
+#define PWR_MGMT_1_REG 0x6B
+#define PWR_MGMT_2_REG 0x6C
+#define SMPLRT_DIV_REG 0x19
+#define ACCEL_CONFIG_REG 0x1C
+#define ACCEL_XOUT_H_REG 0x3B
+#define TEMP_OUT_H_REG 0x41
+#define GYRO_CONFIG_REG 0x1B
+#define GYRO_XOUT_H_REG 0x43
+
 // Kalman structure
 typedef struct
 {
@@ -24,26 +37,10 @@ typedef struct
 		Kalman_t KalmanX;
 		Kalman_t KalmanY;
 		
-	  int16_t Accel_X_RAW;
-    int16_t Accel_Y_RAW;
-    int16_t Accel_Z_RAW;
-    double Ax;
-    double Ay;
-    double Az;
-
-    int16_t Gyro_X_RAW;
-    int16_t Gyro_Y_RAW;
-    int16_t Gyro_Z_RAW;
-    double Gx;
-    double Gy;
-    double Gz;
-	
-		double   last_dt;
-	
 		uint32_t timer;
 	
     double KalmanAngleX;
-    double KalmanAngleY; // pitch
+    double KalmanAngleY;
 } MPU6500_t;
 
 
@@ -51,17 +48,6 @@ uint8_t init_mpu(SPI_HandleTypeDef* hspi, GPIO_TypeDef* cs_port, uint16_t cs_pin
 
 void process_mpu_data(MPU6500_t* mpu_state, const uint8_t raw14[14]);
 
-static inline void Kalman_Init(Kalman_t *k)
-{
-    k->Q_angle   = 0.001f;
-    k->Q_bias    = 0.003f;
-    k->R_measure = 0.03f;
+void Kalman_Init(Kalman_t *k);
 
-    k->angle = 0.0f;
-    k->bias  = 0.0f;
-
-    k->P[0][0] = 0.0f;
-    k->P[0][1] = 0.0f;
-    k->P[1][0] = 0.0f;
-    k->P[1][1] = 0.0f;
-}
+#endif

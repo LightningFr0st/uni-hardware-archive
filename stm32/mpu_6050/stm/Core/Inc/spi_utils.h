@@ -38,4 +38,20 @@ static inline HAL_StatusTypeDef mpu_read_register(SPI_HandleTypeDef *hspi, GPIO_
     return st;
 }
 
+static inline HAL_StatusTypeDef mpu_read_registers(SPI_HandleTypeDef *hspi, GPIO_TypeDef *cs_port, uint16_t cs_pin, uint8_t reg, uint8_t *dst, uint16_t len)
+{
+    uint8_t cmd = reg | 0x80;
+
+    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_RESET);
+
+    HAL_StatusTypeDef st = HAL_SPI_Transmit(hspi, &cmd, 1, HAL_MAX_DELAY);
+    if (st == HAL_OK) {
+        st = HAL_SPI_Receive(hspi, dst, len, HAL_MAX_DELAY);
+    }
+
+    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_SET);
+
+    return st;
+}
+
 #endif

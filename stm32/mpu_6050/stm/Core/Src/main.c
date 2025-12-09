@@ -21,12 +21,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+
 #include "stdio.h"
 #include "string.h"
-#include "stdbool.h"
 
 #include "mpu6050.h"
-
 #include "sd.h"
 
 /* USER CODE END Includes */
@@ -34,20 +33,66 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
+typedef struct 
+{
+    MPU6500_t mpu_state;
+	
+		// CS info
+	  GPIO_TypeDef *cs_port;
+    uint16_t      cs_pin;
+    
+} MPUDescr_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t mpu_id;
+    float   kx; // roll
+    float   ky; // pitch
+} LogPacket_t;
+
+typedef enum
+{
+	NONE = 0,
+	WRITE = 1,
+  WAIT_AFTER_WRITE = 2,
+	READ = 3,
+	WAIT_AFTER_READ = 4,
+	STATES_NUM = 5
+} ProgState_t;
+
+typedef enum 
+{ 
+  CHUNK_FREE = 0,
+  CHUNK_COMMITTED = 1, 
+  CHUNK_LOCKED = -1,
+  CHUNK_IN_TRANSACTION = 2,
+} Chunk_state_t;
+
+typedef struct
+{
+  uint8_t packNum;
+  uint8_t * dataPtr;
+} PeekResults;
+
+#define LOG_BUFFER_SIZE 1024
+#define NUM_CHUNKS 2
+typedef struct 
+{
+    uint8_t  data[LOG_BUFFER_SIZE];
+
+    volatile uint16_t head;
+    volatile uint16_t tail;
+		volatile int8_t states_of_chunks[NUM_CHUNKS]; 
+	
+} RingBuffer_t;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-//#define MPU6050_Address 0xD0
-//#define PWR_MGMT_1_REG 0x6B
-//#define SMPLRT_DIV_REG 0x19
-//#define ACCEL_CONFIG_REG 0x1B
-//#define GYRO_CONFIG_REG 0x1C
-//#define INT_ENABLE_REG 0x38
-//#define INT_PIN_CFG_REG 0x37
-//#define ACCEL_XOUT_H_REG 0x3B
-//#define INT_STATUS 0x3A
+#define NUM_MPU_SPI 5
+#define MAX_BLOCK_BYTES_NUM 504
+#define PACKET_SIZE 9
 
 /* USER CODE END PD */
 
@@ -66,6 +111,22 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 
+static volatile ProgState_t curr_state = NONE;
+
+static volatile uint8_t is_changed_state = 0;
+static volatile uint32_t sd_write_block_counter = 0;
+static volatile uint8_t need_send = 1;
+
+static MPUDescr_t mpu_descriptors[5] = {
+    { {0}, CS0_GPIO_Port, CS0_Pin },
+    { {0}, CS1_GPIO_Port, CS1_Pin },
+    { {0}, CS2_GPIO_Port, CS2_Pin },
+    { {0}, CS3_GPIO_Port, CS3_Pin },
+		{ {0}, CS4_GPIO_Port, CS4_Pin },
+};
+
+static RingBuffer_t log_rb;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -82,86 +143,7 @@ static void MX_SPI2_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-// ==== SPI-?????? ?????? ? MPU6500 ====
-
-#define ACCEL_XOUT_H_REG 0x3B
-#define NUM_MPU_SPI 5
-
-typedef struct {
-    MPU6500_t mpu_state;
-	
-		// CS info
-	  GPIO_TypeDef *cs_port;
-    uint16_t      cs_pin;
-    
-} MPUDescriptor;
-
-typedef struct __attribute__((packed)) {
-    uint8_t mpu_id;
-    float   kx; // roll
-    float   ky; // pitch
-} LogPacket_t;
-
-#define LOG_BUFFER_SIZE 1024
-#define MAX_BLOCK_BYTES_NUM 504
-#define TXT_BUF_SIZE 1024
-#define PACKET_SIZE 9
-#define NUM_CHUNKS 2
-
-static char txt_buf[TXT_BUF_SIZE];
-
-typedef enum{
-	NONE,
-	WRITE,
-  WAIT,
-	READ,
-	WAIT_READ,
-	STATES_NUM
-} ProgState_t;
-
-typedef enum { 
-  CHUNK_FREE = 0,
-  CHUNK_COMMITTED = 1, 
-  CHUNK_LOCKED = -1,
-  CHUNK_IN_TRANSACTION = 2,
-} Chunk_state_t;
-
-typedef struct{
-  uint8_t packNum;
-  uint8_t * dataPtr;
-}PeekResults;
-
-typedef struct {
-    uint8_t  data[LOG_BUFFER_SIZE];
-
-    volatile uint16_t head;
-    volatile uint16_t tail;
-		volatile int8_t states_of_chunks[NUM_CHUNKS]; 
-	
-} RingBuffer_t;
-
-
-static volatile ProgState_t curr_state = NONE;
-static volatile uint8_t sd_initialized = 0; //*
-static volatile uint8_t is_changed_state = 0;
-static volatile uint32_t sd_write_block_counter = 0;
-static volatile uint8_t sd_read_complete = 0;
-
-static volatile uint8_t need_send = 1;
-
-static MPUDescriptor mpu_descriptors[5] = {
-    { {0}, CS0_GPIO_Port, CS0_Pin },
-    { {0}, CS1_GPIO_Port, CS1_Pin },
-    { {0}, CS2_GPIO_Port, CS2_Pin },
-    { {0}, CS3_GPIO_Port, CS3_Pin },
-		{ {0}, CS4_GPIO_Port, CS4_Pin },
-};
-
-static RingBuffer_t log_rb;
-
-
-
-static void rb_init(RingBuffer_t *rb)
+static inline void rb_init(RingBuffer_t *rb)
 {
     rb->head = 0;
     rb->tail = 0;
@@ -173,7 +155,6 @@ static void rb_init(RingBuffer_t *rb)
     memset(rb->data, 0, sizeof(rb->data));
 }
 
-
 static inline uint32_t chunk_start_ind(uint16_t chunk_id)
 { 
   return (uint32_t)chunk_id * SD_CHUNK_SIZE; 
@@ -181,7 +162,7 @@ static inline uint32_t chunk_start_ind(uint16_t chunk_id)
 
 static inline uint32_t chunk_end_bound(uint16_t chunk_id)
 { 
-  return chunk_start_ind(chunk_id) + MAX_BLOCK_BYTES_NUM; //*? MAX_BLOCK_BYTES_NUM
+  return chunk_start_ind(chunk_id) + MAX_BLOCK_BYTES_NUM;
 }
 
 static inline uint8_t curr_chunk(uint16_t curr_ind)
@@ -196,7 +177,6 @@ inline static uint8_t next_chunk(uint16_t chunk_id)
 
 static int16_t rb_push_bytes(uint8_t * src, uint16_t len)
 {
-  // PUSH_INF
   
   if (len == 0 || len > MAX_BLOCK_BYTES_NUM)
     return 0;
@@ -204,7 +184,7 @@ static int16_t rb_push_bytes(uint8_t * src, uint16_t len)
   uint8_t operated_chunk = curr_chunk(log_rb.head); 
 
   if (log_rb.states_of_chunks[operated_chunk] != CHUNK_FREE) 
-    return -1; //log_rb.states_of_chunks[operated_chunk];
+    return -1;
 
   uint32_t start = chunk_start_ind(operated_chunk);
   uint32_t bound = start + MAX_BLOCK_BYTES_NUM;
@@ -214,12 +194,6 @@ static int16_t rb_push_bytes(uint8_t * src, uint16_t len)
 
   if (len > avail) 
   {
-    // if(len < PACKET_SIZE)
-    // {
-    //   rb->states_of_chunks[operated_chunk] = CHUNK_LOCKED;
-    //   rb->data[start + SD_CHUNK_SIZE - 1] = offset_in_chunk;
-    //   return CHUNK_LOCKED;
-    // }
     return 0;
   }
       
@@ -238,65 +212,14 @@ static int16_t rb_push_bytes(uint8_t * src, uint16_t len)
   return len; 
 }
 
-static int16_t rb_pop_bytes(uint8_t * dest,uint16_t len)
-{
-  if (len == 0 || len > MAX_BLOCK_BYTES_NUM)
-    return 0;
-
-  uint8_t operated_chunk = curr_chunk(log_rb.tail); 
-
-  if (log_rb.states_of_chunks[operated_chunk] != CHUNK_LOCKED) 
-    return 0; //* -1?
-
-  uint32_t start = chunk_start_ind(operated_chunk);
-  uint32_t bound = start + MAX_BLOCK_BYTES_NUM;
-
-  uint32_t filled_packet_num = log_rb.data[start + SD_CHUNK_SIZE - 1]; // last byte has val
-
-  uint16_t avilable_len = filled_packet_num * PACKET_SIZE;
-  if (len > avilable_len) 
-  {
-    len = avilable_len;
-  }
-
-  log_rb.tail += len;
-
-  if (log_rb.tail == bound) {
-
-//    log_rb.states_of_chunks[operated_chunk] = CHUNK_FREE; //* !!!
-
-    log_rb.tail = chunk_start_ind(next_chunk(operated_chunk));
-
-  }
-
-  return len; 
-}
-
 static int16_t log_push_packet(uint8_t mpu_idx, const MPU6500_t *mpu_state)
 {
-	
     LogPacket_t pkt;
     pkt.mpu_id = mpu_idx;
     pkt.kx = (float)mpu_state->KalmanAngleX;
     pkt.ky = (float)mpu_state->KalmanAngleY;
 
     return rb_push_bytes((uint8_t *) &pkt, sizeof(pkt));
-}
-
-static HAL_StatusTypeDef mpu_spi_read_regs(MPUDescriptor *s, uint8_t reg, uint8_t *dst, uint16_t len)
-{
-    uint8_t cmd = reg | 0x80;
-
-    HAL_GPIO_WritePin(s->cs_port, s->cs_pin, GPIO_PIN_RESET);
-
-    HAL_StatusTypeDef st = HAL_SPI_Transmit(&hspi1, &cmd, 1, HAL_MAX_DELAY);
-    if (st == HAL_OK) {
-        st = HAL_SPI_Receive(&hspi1, dst, len, HAL_MAX_DELAY);
-    }
-
-    HAL_GPIO_WritePin(s->cs_port, s->cs_pin, GPIO_PIN_SET);
-
-    return st;
 }
 
 void parse_and_send_packets(const uint8_t *data, uint16_t packet_num)
@@ -311,7 +234,7 @@ void parse_and_send_packets(const uint8_t *data, uint16_t packet_num)
     for (uint16_t i = 0; i < packet_num; ++i) {
         
         const uint32_t offset = (uint32_t)i * PACKET_SIZE;
-        if (offset + PACKET_SIZE > SD_CHUNK_SIZE) break; // safety
+        if (offset + PACKET_SIZE > SD_CHUNK_SIZE) break;
 
         LogPacket_t pkt;
         memcpy(&pkt, data + i * PACKET_SIZE, PACKET_SIZE);
@@ -331,33 +254,17 @@ void parse_and_send_packets(const uint8_t *data, uint16_t packet_num)
     }
 }
 
-
 static void log_peek_chunk(PeekResults *pRes)
 {
     uint16_t tail = log_rb.tail;
-    uint8_t chunk_id = curr_chunk(tail);          // 0 ??? 1 ??? NUM_CHUNKS = 2
+    uint8_t chunk_id = curr_chunk(tail);
 
-    uint32_t start = chunk_start_ind(chunk_id);   // chunk_id * SD_CHUNK_SIZE
+    uint32_t start = chunk_start_ind(chunk_id);
 
     pRes->dataPtr = &log_rb.data[start];
 
     pRes->packNum = log_rb.data[start + SD_CHUNK_SIZE - 1];
 }
-
-//static void log_flush_half(void) //*
-//{
-//    if (rb_size(&log_rb) >= SD_CHUNK_SIZE) {
-//				
-//        uint8_t out[SD_CHUNK_SIZE];
-//        uint16_t n = rb_pop_bytes(&log_rb, out, SD_CHUNK_SIZE);
-//        if (n > 0) 
-//				{	
-//          //* PARSE
-//            HAL_UART_Transmit(&huart2, out, n, HAL_MAX_DELAY);
-//        }
-//    }
-//}
-
 
 static void send_mpu_data(uint8_t idx)
 {	
@@ -365,8 +272,6 @@ static void send_mpu_data(uint8_t idx)
 	
     char buf[64];
 	  
-		uint32_t now = HAL_GetTick();
-
 		int len = snprintf(buf, sizeof(buf),
 											 "#%d#%.4f#%.4f\r\n",
 											 idx,
@@ -382,7 +287,7 @@ static void send_mpu_data(uint8_t idx)
 
 static void none_state_act(uint8_t* raw){
   for (int i = 0; i < NUM_MPU_SPI; ++i) {
-    if (mpu_spi_read_regs(&mpu_descriptors[i], ACCEL_XOUT_H_REG, raw, 14) == HAL_OK) 
+    if (mpu_read_registers(&hspi1, mpu_descriptors[i].cs_port, mpu_descriptors[i].cs_pin, ACCEL_XOUT_H_REG, raw, 14) == HAL_OK) 
     {
       process_mpu_data(&mpu_descriptors[i].mpu_state, raw);
       send_mpu_data(i);
@@ -402,13 +307,11 @@ static uint8_t iterate_sent_chunks(){
         log_peek_chunk(&chunkInf);
         log_rb.states_of_chunks[i] = CHUNK_IN_TRANSACTION;
         
-        int DMA_send_status = SD_StartWriteBlock(START_BLOCK_NUM + sd_write_block_counter, chunkInf.dataPtr, 100); //- sd_write_block_counter++
+        int DMA_send_status = SD_StartWriteBlock(START_BLOCK_NUM + sd_write_block_counter, chunkInf.dataPtr, 100);
         if(DMA_send_status != HAL_OK){
-          //- sd_write_block_counter--;
           log_rb.tail = last_tail;
           log_rb.states_of_chunks[i] = CHUNK_LOCKED;
         }
-
         //processed_num++;
         break;
 			case CHUNK_COMMITTED: 
@@ -439,7 +342,7 @@ static void write_state_act(uint8_t* raw)
   } 
 
   for (int i = 0; i < NUM_MPU_SPI; ++i) {
-    if (mpu_spi_read_regs(&mpu_descriptors[i], ACCEL_XOUT_H_REG, raw, 14) == HAL_OK) 
+    if (mpu_read_registers(&hspi1, mpu_descriptors[i].cs_port, mpu_descriptors[i].cs_pin, ACCEL_XOUT_H_REG, raw, 14) == HAL_OK) 
     {
       process_mpu_data(&mpu_descriptors[i].mpu_state, raw);
       uint16_t push_res = log_push_packet(i, &mpu_descriptors[i].mpu_state);	
@@ -447,19 +350,6 @@ static void write_state_act(uint8_t* raw)
         send_mpu_data(i);
       }
       iterate_sent_chunks(); 
-
-    }
-  }
-}
-
-
-void sd_dma_callback(void)
-{
-  for(int i = 0; i < NUM_CHUNKS; i++)
-	{
-  	if(log_rb.states_of_chunks[i] == CHUNK_IN_TRANSACTION)
-		{
-      log_rb.states_of_chunks[i] = CHUNK_COMMITTED;
     }
   }
 }
@@ -475,134 +365,92 @@ static void read_state_act()
 	
 	if(sd_write_block_counter != 0)
 	{
-			char buffer[] = "TRANSMITION BEGIN\r\n";
-			char buffer2[] = "TRANSMITION END\r\n";
-			char buffer3[12];
-		
-		
-			int code = SD_ReadBegin(START_BLOCK_NUM);
-			if(code < 0) {
-					return;
-			}
-			memset(buffer3, 0, sizeof(buffer3));
-			snprintf(buffer3, sizeof(buffer3) ,"CHUNKS: %d", sd_write_block_counter);
-			//HAL_UART_Transmit(&huart2,(uint8_t*)(buffer3), sizeof(buffer3), HAL_MAX_DELAY);
-			
-			for (int i = 0; i < sd_write_block_counter; i++){
-				//HAL_UART_Transmit(&huart2,(uint8_t*)(buffer), sizeof(buffer), HAL_MAX_DELAY);
-				code = SD_ReadData(log_rb.data);
-				if(code >= 0)
-				{
-					snprintf(buffer3, sizeof(buffer3) ,"PACKETS: %d", log_rb.data[SD_CHUNK_SIZE-1]);
-					//HAL_UART_Transmit(&huart2,(uint8_t*)(buffer3), sizeof(buffer3), HAL_MAX_DELAY);
-					
+    int code = SD_ReadBegin(START_BLOCK_NUM);
+    if(code < 0) {
+        return;
+    }
+    for (int i = 0; i < sd_write_block_counter; i++){
+      code = SD_ReadData(log_rb.data);
+      if(code >= 0)
+      {
+        uint8_t packet_num = log_rb.data[SD_CHUNK_SIZE-1];
+        if (packet_num == 0 || packet_num > MAX_BLOCK_BYTES_NUM/PACKET_SIZE){
+          continue;
+        }
+        parse_and_send_packets(log_rb.data, packet_num);
+      }
+    }
 
-          uint8_t packet_num = log_rb.data[SD_CHUNK_SIZE-1];
-          if (packet_num == 0 || packet_num > MAX_BLOCK_BYTES_NUM/PACKET_SIZE){
-            continue;
-          }
-					parse_and_send_packets(log_rb.data, packet_num);
-					//HAL_UART_Transmit(&huart2,(uint8_t*)(buffer2), sizeof(buffer2), HAL_MAX_DELAY);
-				}
-			}
-
-			code = SD_ReadEnd();
-			if(code < 0) {
-					return;
+    code = SD_ReadEnd();
+    if(code < 0) 
+    {
+        return;
     }
 		
-//		for (int i = 0; i < sd_write_block_counter; i++){
-//			uint8_t read_res = SD_ReadSingleBlock(START_BLOCK_NUM + i, log_rb.data);
-//			if(read_res == 0)
-//			{
-//				parse_and_send_packets(log_rb.data, log_rb.data[SD_CHUNK_SIZE-1]);
-//			}
-//		}		
-		curr_state = WAIT_READ;
+		curr_state = WAIT_AFTER_READ;
 		sd_write_block_counter = 0;
 	}
-	
-
-//  curr_state = NONE;
-//  sd_write_block_counter = 0;
 }
 
 static void poll_loop_spi(void)
 {
-		uint8_t raw_data[14];
-		memset(raw_data, 0, sizeof(raw_data));
-    
-		while (1) 
-		{
-      switch(curr_state)
-      {
-        case NONE:
-          none_state_act(raw_data);
-          break;
-        case WRITE:
-          write_state_act(raw_data);
-          break;
-        case WAIT:
-          if(need_send){
-            need_send = iterate_sent_chunks();
-          }
-          break;
-        case READ:
-          read_state_act();
-          break;
-				case WAIT_READ:
-					break;
-				default:
-					break;
-
-      }
-
+  uint8_t raw_data[14];
+  while (1) 
+  {
+    switch(curr_state)
+    {
+      case NONE:
+        none_state_act(raw_data);
+        break;
+      case WRITE:
+        write_state_act(raw_data);
+        break;
+      case WAIT_AFTER_WRITE:
+        if(need_send)
+        {
+          need_send = iterate_sent_chunks();
+        }
+        break;
+      case READ:
+        read_state_act();
+        break;
+      default:
+        break;
     }
+  }
 }
 
 
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 {
     if(hspi == &SD_SPI_PORT) {
-        sd_dma_callback();
+      for(int i = 0; i < NUM_CHUNKS; i++)
+      {
+        if(log_rb.states_of_chunks[i] == CHUNK_IN_TRANSACTION)
+        {
+          log_rb.states_of_chunks[i] = CHUNK_COMMITTED;
+        }
+      }
     }
-}
-
-static void initSD(void) //*
-{
-	int sdInitCode;
-	sdInitCode	= SD_Init(); //add error logic
-	//uint32_t blocksNum;
-	//sdInitCode = SD_GetBlocksNumber(&blocksNum); //add error logic	
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 	if(GPIO_Pin == SWITCH_STATE_BTN_Pin)
 	{
-		++curr_state; 
-		if(curr_state == STATES_NUM)
+    if(curr_state == WAIT_AFTER_WRITE && need_send != 0)
+    {
+        return;
+    }
+		
+    if(++curr_state == STATES_NUM)
 		{
 			curr_state = NONE;
 		}
+
 		is_changed_state = 1;
-		
-//    switch(curr_state){
-//			case NONE: 
-//				
-//				break;
-//      case WRITE:
-//        curr_state = READ;
-//				need_send = 1;
-//			case 
-////*
-//    }  
-//		GPIO_PinState state = HAL_GPIO_ReadPin(SWITCH_STATE_BTN_GPIO_Port, SWITCH_STATE_BTN_Pin);
-//		curr_state = (curr_state + 1) % STATES_NUM;
 	}
 }
-
-
 
 /* USER CODE END 0 */
 
@@ -641,8 +489,7 @@ int main(void)
   MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
 		
-	initSD();
-	
+	SD_Init();
 	
 	rb_init(&log_rb);
 	

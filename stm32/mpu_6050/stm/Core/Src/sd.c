@@ -442,16 +442,9 @@ int SD_FinishWriteBlock() {
     return 0;
 }
 
-
-
-
-
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 {
     if(hspi == &SD_SPI_PORT) {
         spi_done = 1; 
     }
 }
-
-
-
