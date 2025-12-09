@@ -303,10 +303,16 @@ void parse_and_send_packets(const uint8_t *data, uint16_t packet_num)
 {
     if (packet_num == 0) 
         return;
+    const uint16_t max_packets = MAX_BLOCK_BYTES_NUM / PACKET_SIZE;
+    if (packet_num > max_packets) packet_num = max_packets;
 
     char line[64];
 
     for (uint16_t i = 0; i < packet_num; ++i) {
+        
+        const uint32_t offset = (uint32_t)i * PACKET_SIZE;
+        if (offset + PACKET_SIZE > SD_CHUNK_SIZE) break; // safety
+
         LogPacket_t pkt;
         memcpy(&pkt, data + i * PACKET_SIZE, PACKET_SIZE);
 
@@ -396,15 +402,13 @@ static uint8_t iterate_sent_chunks(){
         log_peek_chunk(&chunkInf);
         log_rb.states_of_chunks[i] = CHUNK_IN_TRANSACTION;
         
-        int DMA_send_status = SD_StartWriteBlock(START_BLOCK_NUM + sd_write_block_counter++, chunkInf.dataPtr, 100);
+        int DMA_send_status = SD_StartWriteBlock(START_BLOCK_NUM + sd_write_block_counter, chunkInf.dataPtr, 100); //- sd_write_block_counter++
         if(DMA_send_status != HAL_OK){
-          sd_write_block_counter--;
+          //- sd_write_block_counter--;
           log_rb.tail = last_tail;
           log_rb.states_of_chunks[i] = CHUNK_LOCKED;
-        }else
-				{
-						log_rb.states_of_chunks[i] = CHUNK_COMMITTED;
-				}
+        }
+
         //processed_num++;
         break;
 			case CHUNK_COMMITTED: 
@@ -492,7 +496,12 @@ static void read_state_act()
 					snprintf(buffer3, sizeof(buffer3) ,"PACKETS: %d", log_rb.data[SD_CHUNK_SIZE-1]);
 					//HAL_UART_Transmit(&huart2,(uint8_t*)(buffer3), sizeof(buffer3), HAL_MAX_DELAY);
 					
-					parse_and_send_packets(log_rb.data, log_rb.data[SD_CHUNK_SIZE-1]);
+
+          uint8_t packet_num = log_rb.data[SD_CHUNK_SIZE-1];
+          if (packet_num == 0 || packet_num > MAX_BLOCK_BYTES_NUM/PACKET_SIZE){
+            continue;
+          }
+					parse_and_send_packets(log_rb.data, packet_num);
 					//HAL_UART_Transmit(&huart2,(uint8_t*)(buffer2), sizeof(buffer2), HAL_MAX_DELAY);
 				}
 			}

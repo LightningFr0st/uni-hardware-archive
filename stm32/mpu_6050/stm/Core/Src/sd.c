@@ -407,7 +407,7 @@ int SD_StartWriteBlock(uint32_t blockNum, const uint8_t* buff, uint32_t buf_time
     uint8_t dataToken = DATA_TOKEN_CMD24;
     HAL_SPI_Transmit(&SD_SPI_PORT, &dataToken, sizeof(dataToken), HAL_MAX_DELAY);
     //* dma
-    if(HAL_SPI_Transmit(&SD_SPI_PORT, buff, 512, HAL_MAX_DELAY) != HAL_OK)
+    if(HAL_SPI_Transmit_DMA(&SD_SPI_PORT, buff, 512) != HAL_OK)
     {
         return -1;
     }
