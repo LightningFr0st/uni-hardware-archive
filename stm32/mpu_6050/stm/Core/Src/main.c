@@ -24,7 +24,6 @@
 #include "stdio.h"
 #include "string.h"
 #include "stdbool.h"
-#include "math.h"
 
 #include "mpu6050.h"
 
@@ -114,32 +113,30 @@ static char txt_buf[TXT_BUF_SIZE];
 typedef enum{
 	NONE,
 	WRITE,
+  WAIT,
 	READ,
-	SIZE
+	WAIT_READ,
+	STATES_NUM
 } ProgState_t;
 
 typedef enum { 
   CHUNK_FREE = 0,
   CHUNK_COMMITTED = 1, 
   CHUNK_LOCKED = -1,
-  CHUNK_INIT = 2,
+  CHUNK_IN_TRANSACTION = 2,
 } Chunk_state_t;
 
-typedef enum { 
-  PUSH_INF = CHUNK_FREE, 
-  POP_INF = CHUNK_COMMITTED,
-  _MAIN_OPRTN_NUM = 2,
-  PEEK_INF = 3
-} Buf_data_operation;
-
+typedef struct{
+  uint8_t packNum;
+  uint8_t * dataPtr;
+}PeekResults;
 
 typedef struct {
     uint8_t  data[LOG_BUFFER_SIZE];
-    uint16_t buf_ptrs[_MAIN_OPRTN_NUM];
-	
-		volatile uint8_t states_of_chunks[NUM_CHUNKS]; // 1 chunk - free, 2 - ...
-    volatile uint8_t expected_chunks[_MAIN_OPRTN_NUM]; // there are 2 states (either readable or writable)
 
+    volatile uint16_t head;
+    volatile uint16_t tail;
+		volatile int8_t states_of_chunks[NUM_CHUNKS]; 
 	
 } RingBuffer_t;
 
@@ -148,8 +145,9 @@ static volatile ProgState_t curr_state = NONE;
 static volatile uint8_t sd_initialized = 0; //*
 static volatile uint8_t is_changed_state = 0;
 static volatile uint32_t sd_write_block_counter = 0;
-static volatile uint32_t sd_read_block_counter = 0; //*
 static volatile uint8_t sd_read_complete = 0;
+
+static volatile uint8_t need_send = 1;
 
 static MPUDescriptor mpu_descriptors[5] = {
     { {0}, CS0_GPIO_Port, CS0_Pin },
@@ -165,128 +163,114 @@ static RingBuffer_t log_rb;
 
 static void rb_init(RingBuffer_t *rb)
 {
-    for (int i=0; i<_MAIN_OPRTN_NUM; i++)
-    {
-      rb->buf_ptrs[i] = CHUNK_FREE;
-      rb->expected_chunks[i] = 0; 
-    } 
+    rb->head = 0;
+    rb->tail = 0;
 
-    for (int i=0; i<NUM_CHUNKS; i++)
-    {
-      rb->states_of_chunks[i] = CHUNK_FREE;
+    for (int i = 0; i < NUM_CHUNKS; i++) {
+        rb->states_of_chunks[i] = CHUNK_FREE;
     }
 
+    memset(rb->data, 0, sizeof(rb->data));
 }
 
-static inline uint32_t chunk_start_ind(uint8_t chunk_id)
+
+static inline uint32_t chunk_start_ind(uint16_t chunk_id)
 { 
   return (uint32_t)chunk_id * SD_CHUNK_SIZE; 
 }
 
-static inline uint32_t chunk_end_bound(uint8_t chunk_id)
+static inline uint32_t chunk_end_bound(uint16_t chunk_id)
 { 
   return chunk_start_ind(chunk_id) + MAX_BLOCK_BYTES_NUM; //*? MAX_BLOCK_BYTES_NUM
 }
 
-static inline uint8_t next_chunk(uint8_t chunk_id)
+static inline uint8_t curr_chunk(uint16_t curr_ind)
+{ 
+  return (curr_ind / SD_CHUNK_SIZE) % NUM_CHUNKS; 
+}
+
+inline static uint8_t next_chunk(uint16_t chunk_id)
 { 
   return (chunk_id + 1) % NUM_CHUNKS; 
 }
 
-
-static int16_t rb_manage_bytes(
-  RingBuffer_t *rb,
-  uint8_t * data,
-  uint16_t len,
-  Buf_data_operation oprtn_detailed
-)
+static int16_t rb_push_bytes(uint8_t * src, uint16_t len)
 {
-  Buf_data_operation oprtn_type = oprtn_detailed % 2;
+  // PUSH_INF
+  
   if (len == 0 || len > MAX_BLOCK_BYTES_NUM)
     return 0;
 
-  uint8_t operated_chunk = rb->expected_chunks[oprtn_type]; 
+  uint8_t operated_chunk = curr_chunk(log_rb.head); 
 
-  if (rb->states_of_chunks[operated_chunk] != oprtn_type) 
-    return 0;
-
+  if (log_rb.states_of_chunks[operated_chunk] != CHUNK_FREE) 
+    return -1; //log_rb.states_of_chunks[operated_chunk];
 
   uint32_t start = chunk_start_ind(operated_chunk);
+  uint32_t bound = start + MAX_BLOCK_BYTES_NUM;
 
-  uint32_t bound = chunk_end_bound(operated_chunk);
-	uint16_t* bufIndPtr = &rb->buf_ptrs[oprtn_type];
-	uint16_t bufInd = *bufIndPtr;
-
-  if (!(bufInd >= start && bufInd < bound)) { 
-
-    bufInd = (uint16_t) start;
-    *bufIndPtr = bufInd;
-
-  }
-
-  uint32_t offset_in_chunk = bufInd - start;
+  uint32_t offset_in_chunk = log_rb.head - start;
   uint32_t avail = MAX_BLOCK_BYTES_NUM - offset_in_chunk;
 
-  uint16_t res;
-  if(oprtn_type == PUSH_INF)
+  if (len > avail) 
   {
-    if (len > avail) 
-    {
-      if(len < PACKET_SIZE)
-      {
-        rb->states_of_chunks[operated_chunk] = oprtn_type-1;
-        return CHUNK_LOCKED;
-      }
-      return 0;
-
-    }
+    // if(len < PACKET_SIZE)
+    // {
+    //   rb->states_of_chunks[operated_chunk] = CHUNK_LOCKED;
+    //   rb->data[start + SD_CHUNK_SIZE - 1] = offset_in_chunk;
+    //   return CHUNK_LOCKED;
+    // }
+    return 0;
+  }
       
-    for (uint16_t i = 0; i < len; ++i) {
-        rb->data[bufInd++] = data[i];
-    }
-    //*bufIndPtr = bufInd;
-    res = 1;
+  for (uint16_t i = 0; i < len; i++) {
+      log_rb.data[(log_rb.head)++] = src[i];
   }
-  else
+
+  log_rb.data[start + SD_CHUNK_SIZE - 1] += (len / PACKET_SIZE);
+
+  if (log_rb.head == bound)
   {
-    if (len > avail) 
-      len = avail;
-    for (uint16_t i = 0; i < len; ++i) {
-      if(oprtn_detailed == PEEK_INF)
-      {
-        // *bufIndPtr = bufInd; 
-        return len;
-      }
-      if(data != NULL)
-      {
-        data[i] = rb->data[bufInd++];
-      }
-    }
-    //*bufIndPtr = bufInd;
-    res = len;
+    log_rb.states_of_chunks[operated_chunk] = CHUNK_LOCKED; 
+    log_rb.head = chunk_start_ind(next_chunk(operated_chunk));
   }
 
-  if (bufInd == bound) {
-
-    rb->states_of_chunks[operated_chunk] = oprtn_type-1; 
-    
-    // toggle to next chunk
-    uint8_t next_chunk_ind = next_chunk(operated_chunk);
-
-    rb->expected_chunks[oprtn_type] = next_chunk_ind;
-
-    *bufIndPtr = (uint16_t) chunk_start_ind(next_chunk_ind);
-
-  }
-  else
-  {
-    *bufIndPtr = bufInd;
-  }
-
-  return res; 
-
+  return len; 
 }
 
+static int16_t rb_pop_bytes(uint8_t * dest,uint16_t len)
+{
+  if (len == 0 || len > MAX_BLOCK_BYTES_NUM)
+    return 0;
+
+  uint8_t operated_chunk = curr_chunk(log_rb.tail); 
+
+  if (log_rb.states_of_chunks[operated_chunk] != CHUNK_LOCKED) 
+    return 0; //* -1?
+
+  uint32_t start = chunk_start_ind(operated_chunk);
+  uint32_t bound = start + MAX_BLOCK_BYTES_NUM;
+
+  uint32_t filled_packet_num = log_rb.data[start + SD_CHUNK_SIZE - 1]; // last byte has val
+
+  uint16_t avilable_len = filled_packet_num * PACKET_SIZE;
+  if (len > avilable_len) 
+  {
+    len = avilable_len;
+  }
+
+  log_rb.tail += len;
+
+  if (log_rb.tail == bound) {
+
+//    log_rb.states_of_chunks[operated_chunk] = CHUNK_FREE; //* !!!
+
+    log_rb.tail = chunk_start_ind(next_chunk(operated_chunk));
+
+  }
+
+  return len; 
+}
 
 static int16_t log_push_packet(uint8_t mpu_idx, const MPU6500_t *mpu_state)
 {
@@ -296,11 +280,8 @@ static int16_t log_push_packet(uint8_t mpu_idx, const MPU6500_t *mpu_state)
     pkt.kx = (float)mpu_state->KalmanAngleX;
     pkt.ky = (float)mpu_state->KalmanAngleY;
 
-    return rb_manage_bytes(&log_rb, (uint8_t *) &pkt, sizeof(pkt), PUSH_INF);
+    return rb_push_bytes((uint8_t *) &pkt, sizeof(pkt));
 }
-
-
-
 
 static HAL_StatusTypeDef mpu_spi_read_regs(MPUDescriptor *s, uint8_t reg, uint8_t *dst, uint16_t len)
 {
@@ -318,93 +299,43 @@ static HAL_StatusTypeDef mpu_spi_read_regs(MPUDescriptor *s, uint8_t reg, uint8_
     return st;
 }
 
-static void bytes_to_hex(const uint8_t* src, size_t len, char* dst) {
-    static const char hexdig[] = "0123456789ABCDEF";
-    for (size_t i = 0; i < len; ++i) {
-        uint8_t b = src[i];
-        dst[2*i + 0] = hexdig[(b >> 4) & 0xF];
-        dst[2*i + 1] = hexdig[b & 0xF];
-    }
-}
-
-static void process_and_send(uint8_t* buf) {
-	
-		uint8_t pkt[17];
-    pkt[0] = (0);
-
-    pkt[1] = buf[1];  pkt[2] = buf[0];   // AX
-    pkt[3] = buf[3];  pkt[4] = buf[2];   // AY
-    pkt[5] = buf[5];  pkt[6] = buf[4];   // AZ
-	
-    pkt[7]  = buf[9];  pkt[8]  = buf[8];   // GX
-    pkt[9]  = buf[11]; pkt[10] = buf[10];  // GY
-    pkt[11] = buf[13]; pkt[12] = buf[12];  // GZ
-  
-    uint32_t t = HAL_GetTick();
-    pkt[13] = (uint8_t)(t);
-    pkt[14] = (uint8_t)(t >> 8);
-    pkt[15] = (uint8_t)(t >> 16);
-    pkt[16] = (uint8_t)(t >> 24);
-	
-		char line[17*2 + 2];
-    bytes_to_hex(pkt, sizeof(pkt), line);
-    line[34] = '\r';
-    line[35] = '\n';
-
-    HAL_UART_Transmit(&huart2, (uint8_t*)line, 36, 1000);
-}
-
-static volatile uint16_t current_chunk;
-
-void dma_callback(void)
+void parse_and_send_packets(const uint8_t *data, uint16_t packet_num)
 {
-	current_chunk = 1;
-}
+    if (packet_num == 0) 
+        return;
 
+    char line[64];
 
-
-void parse_and_send_packets(const uint8_t *data, uint16_t len)
-{
-    const size_t pkt_size = sizeof(LogPacket_t);
-    uint16_t count = len / pkt_size;
-    if (count == 0) 
-      return;
-  
-    char *out = txt_buf;
-    size_t rem = TXT_BUF_SIZE;
-
-    for (uint16_t i = 0; i < count; ++i) {
+    for (uint16_t i = 0; i < packet_num; ++i) {
         LogPacket_t pkt;
-        memcpy(&pkt, data + i * pkt_size, pkt_size);
+        memcpy(&pkt, data + i * PACKET_SIZE, PACKET_SIZE);
 
-        int need = snprintf(out, rem, "#%d#%.4f#%.4f\r\n",
-                            pkt.mpu_id, pkt.kx, pkt.ky);
-
-        if (need < 0) {
+        int len = snprintf(line, sizeof(line),
+                           "#%d#%.4f#%.4f\r\n",
+                           pkt.mpu_id, pkt.kx, pkt.ky);
+        if (len <= 0) {
             break;
         }
-
-        if ((size_t)need >= rem) {
-            HAL_UART_Transmit(&huart2, (uint8_t*)txt_buf, (uint16_t)(TXT_BUF_SIZE - rem), HAL_MAX_DELAY);
-            // сброс
-            out = txt_buf;
-            rem = TXT_BUF_SIZE;
+        if (len >= (int)sizeof(line)) 
+				{
+            len = sizeof(line) - 1;
         }
-        out += need;
-        rem -= (size_t)need;
-    }
 
-    // отправляем остаток если есть
-    size_t used = TXT_BUF_SIZE - rem;
-    if (used > 0) {
-        HAL_UART_Transmit(&huart2, (uint8_t*)txt_buf, (uint16_t)used, HAL_MAX_DELAY);
+        HAL_UART_Transmit(&huart2, (uint8_t*)line, (uint16_t)len, HAL_MAX_DELAY);
     }
 }
 
-static uint16_t log_peek_chunk(uint8_t **pIndPtr)
+
+static void log_peek_chunk(PeekResults *pRes)
 {
-    *pIndPtr = log_rb.data + log_rb.buf_ptrs[POP_INF];
-    return rb_manage_bytes(&log_rb, NULL, SD_CHUNK_SIZE, PEEK_INF);
+    uint16_t tail = log_rb.tail;
+    uint8_t chunk_id = curr_chunk(tail);          // 0 ??? 1 ??? NUM_CHUNKS = 2
+
+    uint32_t start = chunk_start_ind(chunk_id);   // chunk_id * SD_CHUNK_SIZE
+
+    pRes->dataPtr = &log_rb.data[start];
+
+    pRes->packNum = log_rb.data[start + SD_CHUNK_SIZE - 1];
 }
 
 //static void log_flush_half(void) //*
@@ -443,85 +374,224 @@ static void send_mpu_data(uint8_t idx)
 }
 
 
+static void none_state_act(uint8_t* raw){
+  for (int i = 0; i < NUM_MPU_SPI; ++i) {
+    if (mpu_spi_read_regs(&mpu_descriptors[i], ACCEL_XOUT_H_REG, raw, 14) == HAL_OK) 
+    {
+      process_mpu_data(&mpu_descriptors[i].mpu_state, raw);
+      send_mpu_data(i);
+    }
+  }
+} 
+
+static uint8_t iterate_sent_chunks(){
+  uint8_t processed_num = 0u;
+  for(int i = 0; i < NUM_CHUNKS; i++){
+		uint8_t last_tail = 0;
+		
+    switch (log_rb.states_of_chunks[i]){
+      case CHUNK_LOCKED:
+        last_tail = log_rb.tail;
+        PeekResults chunkInf;
+        log_peek_chunk(&chunkInf);
+        log_rb.states_of_chunks[i] = CHUNK_IN_TRANSACTION;
+        
+        int DMA_send_status = SD_StartWriteBlock(START_BLOCK_NUM + sd_write_block_counter++, chunkInf.dataPtr, 100);
+        if(DMA_send_status != HAL_OK){
+          sd_write_block_counter--;
+          log_rb.tail = last_tail;
+          log_rb.states_of_chunks[i] = CHUNK_LOCKED;
+        }else
+				{
+						log_rb.states_of_chunks[i] = CHUNK_COMMITTED;
+				}
+        //processed_num++;
+        break;
+			case CHUNK_COMMITTED: 
+					SD_FinishWriteBlock();
+					sd_write_block_counter++;
+					log_rb.states_of_chunks[i] = CHUNK_FREE;
+
+					uint8_t chunk_id = curr_chunk(log_rb.tail);
+					log_rb.tail = chunk_start_ind((chunk_id + 1) % NUM_CHUNKS);
+
+					uint32_t start = chunk_start_ind(i);
+					log_rb.data[start + SD_CHUNK_SIZE - 1] = 0;
+					break;
+      case CHUNK_IN_TRANSACTION:
+        processed_num++;
+        break;
+    }
+  }
+  return processed_num;
+}
+
+static void write_state_act(uint8_t* raw)
+{
+  if(is_changed_state)
+  {
+    rb_init(&log_rb);
+    is_changed_state = 0u;
+  } 
+
+  for (int i = 0; i < NUM_MPU_SPI; ++i) {
+    if (mpu_spi_read_regs(&mpu_descriptors[i], ACCEL_XOUT_H_REG, raw, 14) == HAL_OK) 
+    {
+      process_mpu_data(&mpu_descriptors[i].mpu_state, raw);
+      uint16_t push_res = log_push_packet(i, &mpu_descriptors[i].mpu_state);	
+      if(push_res > 0){
+        send_mpu_data(i);
+      }
+      iterate_sent_chunks(); 
+
+    }
+  }
+}
+
+
+void sd_dma_callback(void)
+{
+  for(int i = 0; i < NUM_CHUNKS; i++)
+	{
+  	if(log_rb.states_of_chunks[i] == CHUNK_IN_TRANSACTION)
+		{
+      log_rb.states_of_chunks[i] = CHUNK_COMMITTED;
+    }
+  }
+}
+
+static void read_state_act()
+{
+  if(is_changed_state)  
+  { 
+    rb_init(&log_rb);
+    is_changed_state = 0u;
+  } 
+
+	
+	if(sd_write_block_counter != 0)
+	{
+			char buffer[] = "TRANSMITION BEGIN\r\n";
+			char buffer2[] = "TRANSMITION END\r\n";
+			char buffer3[12];
+		
+		
+			int code = SD_ReadBegin(START_BLOCK_NUM);
+			if(code < 0) {
+					return;
+			}
+			memset(buffer3, 0, sizeof(buffer3));
+			snprintf(buffer3, sizeof(buffer3) ,"CHUNKS: %d", sd_write_block_counter);
+			//HAL_UART_Transmit(&huart2,(uint8_t*)(buffer3), sizeof(buffer3), HAL_MAX_DELAY);
+			
+			for (int i = 0; i < sd_write_block_counter; i++){
+				//HAL_UART_Transmit(&huart2,(uint8_t*)(buffer), sizeof(buffer), HAL_MAX_DELAY);
+				code = SD_ReadData(log_rb.data);
+				if(code >= 0)
+				{
+					snprintf(buffer3, sizeof(buffer3) ,"PACKETS: %d", log_rb.data[SD_CHUNK_SIZE-1]);
+					//HAL_UART_Transmit(&huart2,(uint8_t*)(buffer3), sizeof(buffer3), HAL_MAX_DELAY);
+					
+					parse_and_send_packets(log_rb.data, log_rb.data[SD_CHUNK_SIZE-1]);
+					//HAL_UART_Transmit(&huart2,(uint8_t*)(buffer2), sizeof(buffer2), HAL_MAX_DELAY);
+				}
+			}
+
+			code = SD_ReadEnd();
+			if(code < 0) {
+					return;
+    }
+		
+//		for (int i = 0; i < sd_write_block_counter; i++){
+//			uint8_t read_res = SD_ReadSingleBlock(START_BLOCK_NUM + i, log_rb.data);
+//			if(read_res == 0)
+//			{
+//				parse_and_send_packets(log_rb.data, log_rb.data[SD_CHUNK_SIZE-1]);
+//			}
+//		}		
+		curr_state = WAIT_READ;
+		sd_write_block_counter = 0;
+	}
+	
+
+//  curr_state = NONE;
+//  sd_write_block_counter = 0;
+}
+
 static void poll_loop_spi(void)
 {
 		uint8_t raw_data[14];
 		memset(raw_data, 0, sizeof(raw_data));
-	
+    
 		while (1) 
 		{
-        for (int i = 0; i < NUM_MPU_SPI; ++i) {
-            if (mpu_spi_read_regs(&mpu_descriptors[i], ACCEL_XOUT_H_REG, raw_data, 14) == HAL_OK) 
-						{
-              switch(curr_state){
-                case NONE:
-                  process_mpu_data(&mpu_descriptors[i].mpu_state, raw_data);
-                  //log_push_packet(i, &mpu_descriptors[i].mpu_state);	
-                  send_mpu_data(i);
-                  break;
-                case WRITE:
-                  if(is_changed_state)
-                  {
-                    rb_init(&log_rb);
-                    memset(log_rb.data, 0, sizeof(log_rb.data));
-                    is_changed_state = 0u;
-                  } 
-                  process_mpu_data(&mpu_descriptors[i].mpu_state, raw_data);	
-                  int16_t res = log_push_packet(i, &mpu_descriptors[i].mpu_state);
-                  
-                  if(res == CHUNK_LOCKED || curr_state == READ)
-                  {
-                    uint8_t * peekedIndPtr;
-                    uint16_t peekedLength = log_peek_chunk(&peekedIndPtr);
-                    if (peekedLength > 0) 
-                    {	
-                        // SD
-                        
-                        
-                        parse_and_send_packets(peekedIndPtr, peekedLength);
-                    }
-                    memset(log_rb.data, 0, sizeof(log_rb.data));
-                  }
-                  break;
-                case READ:
-                  if(is_changed_state)  
-                  { 
-                    rb_init(&log_rb);
-                    memset(log_rb.data, 0, sizeof(log_rb.data));
-                    is_changed_state = 0u;
-                  } 
+      switch(curr_state)
+      {
+        case NONE:
+          none_state_act(raw_data);
+          break;
+        case WRITE:
+          write_state_act(raw_data);
+          break;
+        case WAIT:
+          if(need_send){
+            need_send = iterate_sent_chunks();
+          }
+          break;
+        case READ:
+          read_state_act();
+          break;
+				case WAIT_READ:
+					break;
+				default:
+					break;
 
-                  // SD READ
-                  uint8_t * peekedIndPtr;
-                  uint16_t peekedLength = log_peek_chunk(&peekedIndPtr);
-                    if (peekedLength > 0) 
-                    {	
-                        parse_and_send_packets(peekedIndPtr, peekedLength);
-                    }
-                    memset(log_rb.data, 0, sizeof(log_rb.data));
-                  break;
-              }
+      }
 
-                // process_mpu_data(&mpu_descriptors[i].mpu_state, raw_data);
-								// 		log_push_packet(i, &mpu_descriptors[i].mpu_state);	
-								// 		send_mpu_data(i);
-								
-            }
-        }
     }
 }
 
-static const uint32_t StartBlockNum = 0x00ABCD;
 
-static void initSD(void)
+void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    if(hspi == &SD_SPI_PORT) {
+        sd_dma_callback();
+    }
+}
+
+static void initSD(void) //*
 {
 	int sdInitCode;
 	sdInitCode	= SD_Init(); //add error logic
-	uint32_t blocksNum;
-	sdInitCode = SD_GetBlocksNumber(&blocksNum); //add error logic	
+	//uint32_t blocksNum;
+	//sdInitCode = SD_GetBlocksNumber(&blocksNum); //add error logic	
 }
 
-
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+	if(GPIO_Pin == SWITCH_STATE_BTN_Pin)
+	{
+		++curr_state; 
+		if(curr_state == STATES_NUM)
+		{
+			curr_state = NONE;
+		}
+		is_changed_state = 1;
+		
+//    switch(curr_state){
+//			case NONE: 
+//				
+//				break;
+//      case WRITE:
+//        curr_state = READ;
+//				need_send = 1;
+//			case 
+////*
+//    }  
+//		GPIO_PinState state = HAL_GPIO_ReadPin(SWITCH_STATE_BTN_GPIO_Port, SWITCH_STATE_BTN_Pin);
+//		curr_state = (curr_state + 1) % STATES_NUM;
+	}
+}
 
 
 
@@ -578,7 +648,7 @@ int main(void)
 		Kalman_Init(&mpu_descriptors[i].mpu_state.KalmanX);
 		Kalman_Init(&mpu_descriptors[i].mpu_state.KalmanY);
 	}
-	
+	curr_state = NONE;
   poll_loop_spi();
   /* USER CODE END 2 */
 

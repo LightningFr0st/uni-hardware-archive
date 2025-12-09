@@ -57,7 +57,7 @@ int main(int argc, char* argv[])
 		}
 		});
 
-	if (!reader.open(PORT_NAME)) {
+	if (!reader.open(PORT_NAME, 115200)) {
 		fprintf(stderr, "Failed to open %s\n", PORT_NAME);
 		SDL_DestroyRenderer(ren); SDL_DestroyWindow(win); SDL_Quit();
 		return 1;
@@ -150,7 +150,7 @@ int main(int argc, char* argv[])
 			SDL_RenderDrawLine(ren, s.x - 3, s.y, s.x + 3, s.y);
 			SDL_RenderDrawLine(ren, s.x, s.y - 3, s.x, s.y + 3);
 		}
-
+		SDL_Delay(10);
 		SDL_RenderPresent(ren);
 	}
 
