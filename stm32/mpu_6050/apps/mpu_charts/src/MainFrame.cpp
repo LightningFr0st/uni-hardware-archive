@@ -58,7 +58,7 @@ MainFrame::MainFrame(wxString const& title)
 			chartX->CallAfter([this, pkt] { chartX->push_value(pkt.mpu_addr, unsigned_tilt(pkt.kx)); });
 			chartY->CallAfter([this, pkt] { chartY->push_value(pkt.mpu_addr, unsigned_tilt(pkt.ky)); });
 		});
-	com_reader.open("COM3");
+	com_reader.open("COM5");
 
 	timer = new wxTimer(this, 1001);
 	timer->Start(16);
