@@ -23,11 +23,9 @@ MainFrame::MainFrame(wxString const& title)
 	chartX->set_title("Kalman Angle X");
 	chartY->set_title("Kalman Angle Y");
 
-	wxColour const colors[4] = { *wxRED, *wxBLUE, *wxGREEN, *wxCYAN };
-	for (int i = 0; i < 4; ++i) {
-		int const i2c = i / 2;
-		int const addr = i % 2;
-		string const label = "I" + to_string(i2c) + "-A" + to_string(addr);
+	wxColour const colors[5] = { *wxRED, *wxBLUE, *wxGREEN, *wxCYAN, *wxYELLOW };
+	for (int i = 0; i < 5; ++i) {
+		string const label = "MPU" + to_string(i);
 		chartX->add_series(label, colors[i]);
 		chartY->add_series(label, colors[i]);
 	}
