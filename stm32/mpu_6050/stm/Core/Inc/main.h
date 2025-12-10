@@ -84,7 +84,7 @@ void Error_Handler(void);
 #define CS0_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
-
+#define MIN_CLICK_INTERVAL 100u
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

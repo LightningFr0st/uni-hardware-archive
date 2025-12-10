@@ -117,6 +117,8 @@ static volatile uint8_t is_changed_state = 0;
 static volatile uint32_t sd_write_block_counter = 0;
 static volatile uint8_t need_send = 1;
 
+volatile uint32_t last_click_ticks = 0u;
+
 static MPUDescr_t mpu_descriptors[5] = {
     { {0}, CS0_GPIO_Port, CS0_Pin },
     { {0}, CS1_GPIO_Port, CS1_Pin },
@@ -438,17 +440,22 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 	if(GPIO_Pin == SWITCH_STATE_BTN_Pin)
 	{
-    if(curr_state == WAIT_AFTER_WRITE && need_send != 0)
-    {
-        return;
-    }
-		
-    if(++curr_state == STATES_NUM)
+		uint32_t curr_click_ticks = HAL_GetTick();
+		if(curr_click_ticks - last_click_ticks >= MIN_CLICK_INTERVAL)
 		{
-			curr_state = NONE;
-		}
+			last_click_ticks = curr_click_ticks;
+			if(curr_state == WAIT_AFTER_WRITE && need_send != 0)
+			{
+					return;
+			}
+			
+			if(++curr_state == STATES_NUM)
+			{
+				curr_state = NONE;
+			}
 
-		is_changed_state = 1;
+			is_changed_state = 1;
+		}
 	}
 }
 
@@ -489,6 +496,7 @@ int main(void)
   MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
 		
+	last_click_ticks = HAL_GetTick();
 	SD_Init();
 	
 	rb_init(&log_rb);
